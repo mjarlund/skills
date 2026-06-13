@@ -1,31 +1,22 @@
 # claude-skills
 
-Personal Claude Code skills repo.
+Personal Claude Code skills for 3D design and fabrication.
 
-## Usage
+## Quickstart
 
-Point Claude Code at this repo in your settings:
-
-```json
-{
-  "skills": [
-    "~/Documents/claude-skills"
-  ]
-}
-```
-
-Or symlink individual skills into `~/.claude/skills/`:
+Install via [skills.sh](https://skills.sh) or symlink manually:
 
 ```bash
-ln -s ~/Documents/claude-skills/3d-print ~/.claude/skills/3d-print
+# Manual — symlink into Claude Code skills dir
+ln -s ~/Documents/claude-skills/skills/3d/3d-print ~/.claude/skills/3d-print
 ```
 
 ## Skills
 
-| Skill | Description |
-|-------|-------------|
-| [3d-print](./3d-print/SKILL.md) | Generate 3D-printable parts as CadQuery/OpenSCAD scripts |
+### 3D
+
+- **[3d-print](./skills/3d/3d-print/SKILL.md)** — Generate 3D-printable parts as CadQuery/OpenSCAD scripts with FDM best practices. Parametric, measurable, reusable designs.
 
 ## Examples
 
-- [Greenhouse corner rail brace](./3d-print/examples/greenhouse-corner-brace.scad) — 90° L-brace that snaps onto aluminium glazing bar junction, parametric PETG design
+- **[Greenhouse corner rail brace](./skills/3d/3d-print/examples/greenhouse-corner-brace.scad)** — 90° L-brace that pressure-fits onto aluminium glazing bar junction. PETG, no supports, parametric dimensions.
