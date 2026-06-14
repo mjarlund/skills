@@ -18,3 +18,17 @@ This repository contains installable skills.
 - Prefer tool-agnostic guidance unless a tool is explicitly required.
 - Keep workflows checkpointed and testable.
 - Keep language concise, imperative, and outcome-focused.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live in GitHub Issues (`gh` CLI). See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default label vocabulary — no overrides. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context — `CONTEXT.md` + `docs/adr/` at repo root. See `docs/agents/domain.md`.
