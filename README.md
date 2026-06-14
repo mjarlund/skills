@@ -1,4 +1,4 @@
-# My Personal Skills
+# Skills
 
 [![skills.sh](https://skills.sh/b/mjarlund/skills)](https://skills.sh/mjarlund/skills)
 
