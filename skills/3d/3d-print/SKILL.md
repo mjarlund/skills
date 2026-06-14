@@ -1,6 +1,7 @@
 ---
 name: 3d-print
 description: Design 3D-printable parts via parametric CAD scripts, then export STL for slicing and printing. Use when user wants to create a part, enclosure, mount, bracket, adapter, or other printable model.
+references: [REFERENCE.md]
 ---
 
 # 3D Print Skill
@@ -176,6 +177,6 @@ If required tooling is not available, state that clearly and provide the exact c
 
 ## Fastener and tolerance references
 
-For standard dimensions, material offsets, and slicer defaults, refer to REFERENCE.md.
+For standard dimensions, material offsets, and slicer defaults, see REFERENCE.md (declared in frontmatter).
 
 </supporting-info>
