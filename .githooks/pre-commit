@@ -1,7 +1,0 @@
-#!/usr/bin/env bash
-set -euo pipefail
-
-"$(git rev-parse --show-toplevel)/scripts/validate-skills.sh"
-
-# Re-stage README if it was regenerated
-git add "$(git rev-parse --show-toplevel)/README.md"
