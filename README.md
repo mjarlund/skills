@@ -1,22 +1,14 @@
-# claude-skills
+# My Personal Skills
 
-Personal Claude Code skills for 3D design and fabrication.
+These are my personal agent skills that I create, use, and maintain across real projects.
+
+I keep these skills small, composable, and tool-agnostic so they stay useful over time. This repo is intentionally broad: it includes any skill I actively maintain, not just one domain.
 
 ## Quickstart
 
-Install via [skills.sh](https://skills.sh) or symlink manually:
+Install with skills.sh:
 
 ```bash
-# Manual — symlink into Claude Code skills dir
-ln -s ~/Documents/claude-skills/skills/3d/3d-print ~/.claude/skills/3d-print
+npx skills@latest add mjarlund/skills
 ```
 
-## Skills
-
-### 3D
-
-- **[3d-print](./skills/3d/3d-print/SKILL.md)** — Generate 3D-printable parts as CadQuery/OpenSCAD scripts with FDM best practices. Parametric, measurable, reusable designs.
-
-## Examples
-
-- **[Greenhouse corner rail brace](./skills/3d/3d-print/examples/greenhouse-corner-brace.scad)** — 90° L-brace that pressure-fits onto aluminium glazing bar junction. PETG, no supports, parametric dimensions.
