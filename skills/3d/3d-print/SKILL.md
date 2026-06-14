@@ -9,6 +9,10 @@ description: Design 3D-printable parts via parametric CAD scripts, then export S
 
 Drive the user to a manufacturable part definition, then produce a parametric CAD script and STL export path.
 
+Start by asking this exact first question: "Should we use OpenSCAD or CadQuery for this part?"
+
+Do not continue to geometry until the user selects one.
+
 Interview the user across dimensions, material, tolerances, and assembly constraints before writing final geometry.
 
 Ask one question at a time. For each question, include your recommended answer and why.
@@ -30,6 +34,9 @@ Use this staged loop:
 At each checkpoint:
 - Write the updated script to a file in the workspace.
 - Show the file path and a concise summary of what changed.
+- Attempt a build/validation run for the selected tool to verify syntax.
+- Report the exact command run and whether it passed or failed.
+- If it fails, fix errors and re-run validation before asking for approval.
 - Explain what changed and why.
 - Run the printability checklist.
 - Wait for approval before moving on.
@@ -150,6 +157,22 @@ OpenSCAD example:
 ```bash
 openscad -o output.stl model.scad
 ```
+
+## Checkpoint syntax/build validation
+
+Validate at every checkpoint after writing the script file.
+
+OpenSCAD validation command:
+```bash
+openscad -o /tmp/3d-print-check.stl <path-to-model.scad>
+```
+
+CadQuery validation command:
+```bash
+python <path-to-model.py>
+```
+
+If required tooling is not available, state that clearly and provide the exact command the user can run locally.
 
 ## Fastener and tolerance references
 
