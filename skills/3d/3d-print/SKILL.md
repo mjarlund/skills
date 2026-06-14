@@ -176,6 +176,6 @@ If required tooling is not available, state that clearly and provide the exact c
 
 ## Fastener and tolerance references
 
-For standard dimensions, material offsets, and slicer defaults, see REFERENCE.md (declared in frontmatter).
+For standard dimensions, material offsets, and slicer defaults, see REFERENCE.md.
 
 </supporting-info>
