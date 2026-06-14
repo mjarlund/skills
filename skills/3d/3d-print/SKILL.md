@@ -28,13 +28,14 @@ Use this staged loop:
 - Checkpoint C: Finish passes (fillets/chamfers/text/material tweaks) and final STL export guidance.
 
 At each checkpoint:
-- Show the updated script.
+- Write the updated script to a file in the workspace.
+- Show the file path and a concise summary of what changed.
 - Explain what changed and why.
 - Run the printability checklist.
 - Wait for approval before moving on.
 
 When delivering a final answer, include:
-- Final parametric script.
+- Final script file path.
 - Parameter table with defaults.
 - STL generation command or export step.
 - Suggested slicer baseline settings.
@@ -48,9 +49,12 @@ When delivering a final answer, include:
 Pipeline:
 1. Define intent and constraints.
 2. Build parametric CAD script.
-3. Generate STL from the chosen CAD tool.
-4. Slice in the user's slicer of choice.
-5. Print, test fit, iterate.
+3. Write/update the CAD script file in the workspace.
+4. Generate STL from the chosen CAD tool.
+5. Slice in the user's slicer of choice.
+6. Print, test fit, iterate.
+
+Note: prefer editing the same script file through checkpoints instead of creating a new file each time.
 
 Treat OpenSCAD as a first-class target, but keep instructions transferable across CAD tools.
 
@@ -125,6 +129,11 @@ result = (
 ## STL export expectations
 
 Always include an explicit export step for the chosen tool.
+
+Script file conventions:
+- OpenSCAD: use `.scad` files (for example `models/part-name.scad`).
+- CadQuery: use `.py` files (for example `models/part-name.py`).
+- If the user does not provide a path, choose a sensible default path and state it explicitly.
 
 CadQuery example:
 ```python
