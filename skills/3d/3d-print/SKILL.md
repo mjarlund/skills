@@ -10,9 +10,12 @@ references: [REFERENCE.md]
 
 Drive the user to a manufacturable part definition, then produce a parametric CAD script and STL export path.
 
-Start by asking this exact first question: "Should we use OpenSCAD or CadQuery for this part?"
+Start by understanding what the user wants to make: ask about part intent and function first. Do not ask about tool choice upfront — select the tool from these rules and state your recommendation with reason:
+- OpenSCAD: default for simple/medium geometry, standalone workflow, no Python environment.
+- CadQuery: Python already in project, complex parametric assemblies, programmatic repetition.
+- Ask the user only if the choice is genuinely ambiguous after applying these rules.
 
-Do not continue to geometry until the user selects one.
+Confirm tool choice at Checkpoint A before writing geometry.
 
 Interview the user across dimensions, material, tolerances, and assembly constraints before writing final geometry.
 
@@ -20,15 +23,10 @@ Ask one question at a time. For each question, include your recommended answer a
 
 If a question can be answered by existing files in the repo, check files first and avoid asking the user.
 
-Be tool agnostic. Do not force one CAD stack unless the user asks. Prefer whichever of these best fits the request:
-- OpenSCAD when direct script-to-STL workflows are preferred.
-- CadQuery when Python-driven parametrics or richer geometric composition helps.
-- Equivalent parametric CAD script patterns in other tools when explicitly requested.
-
 Preserve the same modeling intent across tools: parameters, constraints, clearances, and printability checks should match regardless of syntax.
 
 Use this staged loop:
-- Checkpoint A: Base body only. No fasteners, no clips, no decorative details.
+- Checkpoint A: Confirm tool choice. Base body only. No fasteners, no clips, no decorative details.
 - Checkpoint B: Functional features (holes, slots, channels, clips, cable paths, mating interfaces).
 - Checkpoint C: Finish passes (fillets/chamfers/text/material tweaks) and final STL export guidance.
 
@@ -76,6 +74,7 @@ Clarify these before full geometry:
 - Strength direction: Which axis sees load?
 - Print constraints: Orientation preference, support tolerance, nozzle/layer assumptions.
 - Fit class: Tight, nominal, or loose for each mating feature.
+- Quantity/intent: One-off prototype or will you print multiples/iterate? (Affects fastener choice, tolerances, material.)
 
 ## Printability checklist
 
