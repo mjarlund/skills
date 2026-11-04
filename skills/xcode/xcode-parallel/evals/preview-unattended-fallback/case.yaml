@@ -1,0 +1,4 @@
+schema_version: "1.1"
+name: preview-unattended-fallback
+expected_outcome: |
+  Agent does not stall on RenderPreview; compiles via xc or suggests a snapshot test.

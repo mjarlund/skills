@@ -34,13 +34,21 @@ Project docs (AGENTS.md, testing guides) often say to run `xcodebuild test -dest
 
 Do not call `xcodebuild ... -destination` or `simctl boot booted` yourself, and do not pick a simulator from `simctl list`. Those are the shared resources other agents are using; `xc` hands you a private one. For raw xcodebuild flags, pass them after `--`: `xc build -- -configuration Release`.
 
-Before opening a PR, prove the change compiles with everything else, not just its own scheme. Two PRs that each built alone have broken `main` together, because a package scheme does not build the app target. Run in order, one call each: the package/library tests (`xc test`), then every scheme that consumes the changed code (`xc build --scheme <app or feature scheme>`, Debug configuration). Also run the test targets CI skips (for example tests that live in the app project rather than a package): check `xc test --plan`/scheme test lists, and say in the PR which suites you could not run.
-
 Add `--json` to `build`/`test` for a final parseable `XC_RESULT {...}` line (use it when you coordinate other agents); `xc status --all` shows which worktrees are busy.
 
 Builds take minutes and many agent shells time out around 10 minutes, so run `xc test` in the background when the project is large and read the log path it prints instead of re-running. Output is already reduced to errors, test failures and a result summary; the full log path is printed at the end.
 
 First use in a worktree creates its simulator by cloning a warmed template (about 5 s). The first use on the whole machine warms that template once (about 65 s; other agents wait for it and are told so). A brand-new simulator would otherwise take about 65 s to boot every time.
+
+## Before opening a PR
+
+Prove the change compiles with everything else, not just its own scheme. Two PRs that each built alone have broken `main` together, because a package scheme does not build the app target. One call each, in order:
+
+1. `xc test` for the package/library the change lives in.
+2. Find the schemes that consume the changed code with `xcodebuild -list` (read-only, allowed) and build each in Debug: `xc build --scheme <app or feature scheme>`.
+3. Run the test targets CI skips, for example tests that live in the app project rather than a package: `xc test --scheme <app scheme>` (or `--plan <name>`).
+
+State in the PR which suites you could not run (previews, device-only tests) instead of leaving the reader to assume everything ran.
 
 ## Using the private simulator for debugging
 
@@ -86,7 +94,7 @@ So build, test and run with `xc`. Unattended agents cannot use `RenderPreview` (
 - `xc status`: identity, simulator state, compile-slot usage, disk use.
 - `xc gc`: also runs automatically at most every 6 h. Reclaims simulators and state of removed worktrees, shuts down simulators idle 45+ min (a booted simulator costs about 1 GB RAM), drops DerivedData unused for 14 days. `xc` only ever creates and deletes simulators named `xcp-*`; the user's own are untouched.
 - Disk: each worktree holds a DerivedData (2-3 GB) plus a simulator. `xc` caps its own DerivedData at 30 GiB (`XC_CACHE_BUDGET_GB`): when a worktree starts its first build it drops the least recently used DerivedData of idle worktrees until under the cap, and `xc gc` enforces it too. Size the cap at about 3 GB per concurrent worktree. Free space is only a hard stop: `xc` refuses to start below 3 GiB free and warns below 10 GiB; then something else is using the disk. Wait or tell the user; do not delete anything. Last resort for the user: delete `~/Library/Caches/xc-parallel`.
-- Cold builds: the first `xc` build in a new worktree takes minutes (4-5 on a large project), later ones about a minute. That is expected; start the worktree's first build early and in the background. Reuse a worktree for the next task rather than creating a new one.
+- Cold builds: the first `xc` build in a new worktree takes minutes (4-5 on a large project), later ones about a minute. That is expected: start the worktree's first build early and in the background rather than waiting on it. Coordinators and users: reusing a worktree for the next task keeps its warm DerivedData; a fresh worktree always pays the cold build.
 - Ambiguity: several projects or schemes make `xc` stop and list them. Pick with `--project` / `--scheme`; the choice is remembered for every worktree of the same repo, so it is made once (large workspaces can have 30+ schemes). `--device "iPhone 17"`, `--runtime 18.5`, `--platform tvos|watchos|visionos|macos` work the same way (env: `XC_DEVICE`, `XC_RUNTIME`).
 - `waiting for ...` lines mean another agent holds a lock or all compile slots. Wait; it is cheaper than a conflict. Do not kill other agents' processes.
 - Not isolatable by `xc`: fixed TCP ports used by tests or local servers, shared on-disk fixture paths outside the repo, shared remote test accounts. Make those per-worktree, for example by deriving them from the simulator UDID (`xc env` prints `XC_SIM_UDID`).
