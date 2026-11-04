@@ -16,6 +16,7 @@ Env: XC_BUILD_SLOTS, XC_DEVICE, XC_RUNTIME. State lives in ~/Library/Caches/xc-p
 import argparse, fcntl, hashlib, json, os, re, shutil, signal, subprocess, sys, time
 
 CACHE = os.path.expanduser("~/Library/Caches/xc-parallel")
+DEFAULT_BUDGET_GB = 30  # cap on all per-worktree DerivedData; env XC_CACHE_BUDGET_GB
 PLATFORMS = {  # key -> (simctl platform name, xcodebuild destination platform)
     "ios": ("iOS", "iOS Simulator"), "tvos": ("tvOS", "tvOS Simulator"),
     "watchos": ("watchOS", "watchOS Simulator"), "visionos": ("visionOS", "visionOS Simulator"),
@@ -431,26 +432,50 @@ def free_gib():
     return shutil.disk_usage(CACHE).free / 2**30
 
 
-def pressure_gc():
-    gl = Lock(os.path.join(CACHE, "slots", "gc.lock"), "gc")
-    if gl.try_acquire():
+def dir_gib(path):
+    r = run(["du", "-sk", path])
+    try:
+        return int(r.stdout.split()[0]) / 2**20
+    except (ValueError, IndexError):
+        return 0.0
+
+
+def enforce_budget(keep=None, verbose=True):
+    """Keep xc's own DerivedData under XC_CACHE_BUDGET_GB by dropping the least recently used
+    DerivedData of idle worktrees. Policy is about what xc owns, not about machine-wide free space."""
+    budget = float(os.environ.get("XC_CACHE_BUDGET_GB", DEFAULT_BUDGET_GB))
+    entries = []
+    for d in os.listdir(CACHE) if os.path.isdir(CACHE) else []:
+        sd = os.path.join(CACHE, d)
+        meta = jload(os.path.join(sd, "meta.json"), None)
+        dd = os.path.join(sd, "DerivedData")
+        if meta and os.path.isdir(dd):
+            entries.append((meta.get("last_used", 0), sd, dd, d))
+    sizes = {e[2]: dir_gib(e[2]) for e in entries}
+    total = sum(sizes.values())
+    for _, sd, dd, d in sorted(entries):  # oldest first
+        if total <= budget:
+            break
+        if sd == keep:
+            continue
+        wl = Lock(os.path.join(sd, "worktree.lock"), "gc")
+        if not wl.try_acquire():  # in use right now
+            continue
         try:
-            gc(verbose=True, stale_days=1)
+            shutil.rmtree(dd, ignore_errors=True)
+            total -= sizes[dd]
+            verbose and log(f"cache over {budget:.0f} GiB budget: dropped DerivedData of {d} ({sizes[dd]:.1f} GiB, least recently used)")
         finally:
-            gl.release()
-    else:  # another agent is already reclaiming; give it a moment
-        time.sleep(5)
+            wl.release()
 
 
 def prelude(args):
     st = State()
+    if not os.path.isdir(st.derived):  # footprint is about to grow: make room by policy first
+        enforce_budget(keep=st.dir)
     free = free_gib()
-    if free < 10:  # disk pressure: reclaim now instead of waiting for the 6 h timer or failing
-        log(f"only {free:.1f} GiB free - running gc (also dropping DerivedData of worktrees idle 1+ day)")
-        pressure_gc()
-        free = free_gib()
     if free < 3:
-        die(f"only {free:.1f} GiB free after gc - builds and simulators need space. Delete old worktrees or clear ~/Library/Developer/Xcode/DerivedData yourself, then retry")
+        die(f"only {free:.1f} GiB free - builds and simulators need space. Run `xc gc`, delete old worktrees, or clear ~/Library/Developer/Xcode/DerivedData")
     if free < 10:
         log(f"WARNING: only {free:.1f} GiB free; every worktree keeps its own DerivedData + simulator")
     opportunistic_gc(st)
@@ -628,7 +653,7 @@ def delete_sim(udid):
     run(["xcrun", "simctl", "delete", udid])
 
 
-def gc(verbose=True, idle_min=45, stale_days=14):
+def gc(verbose=True, idle_min=45):
     known = set()
     now = time.time()
     for d in os.listdir(CACHE) if os.path.isdir(CACHE) else []:
@@ -654,9 +679,9 @@ def gc(verbose=True, idle_min=45, stale_days=14):
                         run(["xcrun", "simctl", "shutdown", e["udid"]])
                         verbose and log(f"shut down idle simulator {e['name']}")
             dd = os.path.join(sd, "DerivedData")
-            if os.path.isdir(dd) and now - meta.get("last_used", 0) > stale_days * 86400:
+            if os.path.isdir(dd) and now - meta.get("last_used", 0) > 14 * 86400:
                 shutil.rmtree(dd, ignore_errors=True)  # stale worktree: reclaim GBs, rebuilt on demand
-                verbose and log(f"dropped DerivedData of {d} (unused {stale_days}d)")
+                verbose and log(f"dropped DerivedData of {d} (unused 14d)")
             for sub in ("logs", "results"):
                 p = os.path.join(sd, sub)
                 for f in os.listdir(p) if os.path.isdir(p) else []:
@@ -675,6 +700,7 @@ def gc(verbose=True, idle_min=45, stale_days=14):
                 if dv["name"].startswith("xcp-") and not dv["name"].startswith("xcp-template-") and dv["udid"] not in known:
                     delete_sim(dv["udid"])
                     verbose and log(f"deleted orphan simulator {dv['name']}")
+    enforce_budget(verbose=verbose)
     os.makedirs(CACHE, exist_ok=True)
     open(os.path.join(CACHE, "last_gc"), "w").write(str(now))
 

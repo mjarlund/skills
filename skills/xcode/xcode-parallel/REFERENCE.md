@@ -11,7 +11,7 @@ Both take 3 worktrees by default (`selftest.sh [--naive] [N]`), build a throwawa
 
 ## Commands
 
-`xc test | build | run | sim | env | status | reset-sim | gc | guard-snippet`. `build` and `test` take `--json` and then end with one parseable `XC_RESULT {ok, exit_code, log, result_bundle, passed, failed, failures[]}` line, handy for coordinator agents. `status --all` lists every known worktree as busy/idle with its simulator state. Flags (remembered, and shared by all worktrees of the same repo via `~/Library/Caches/xc-parallel/repo-<hash>.json`): `--project`, `--scheme`, `--platform ios|tvos|watchos|visionos|macos`, `--device`, `--runtime`, `--configuration`. `test` also takes `--only Target/Class/test`, `--plan`, `--parallel`. Extra xcodebuild flags go after `--`. Env: `XC_BUILD_SLOTS`, `XC_DEVICE`, `XC_RUNTIME`.
+`xc test | build | run | sim | env | status | reset-sim | gc | guard-snippet`. `build` and `test` take `--json` and then end with one parseable `XC_RESULT {ok, exit_code, log, result_bundle, passed, failed, failures[]}` line, handy for coordinator agents. `status --all` lists every known worktree as busy/idle with its simulator state. Flags (remembered, and shared by all worktrees of the same repo via `~/Library/Caches/xc-parallel/repo-<hash>.json`): `--project`, `--scheme`, `--platform ios|tvos|watchos|visionos|macos`, `--device`, `--runtime`, `--configuration`. `test` also takes `--only Target/Class/test`, `--plan`, `--parallel`. Extra xcodebuild flags go after `--`. Env: `XC_BUILD_SLOTS`, `XC_CACHE_BUDGET_GB` (default 30), `XC_DEVICE`, `XC_RUNTIME`.
 
 ## Enforce it: the guard hook (recommended)
 
@@ -36,7 +36,7 @@ An iOS app repo (Xcode workspace with 30+ schemes, about 10 Swift packages, 36 S
 
 ## Field feedback (long session, 4-6 concurrent agents)
 
-No simulator clobbering, "database is locked" or CPU-starvation flakes. Pain points, now addressed in SKILL.md/`xc`: disk dipping to 3.6-5 GiB stalled agents (now gc on pressure), compound commands refused in worktrees (now listed up front), `main` broken by two PRs that built alone (pre-PR recipe), previews unusable unattended (noted). Open: cold build per worktree (about 4-5 min).
+No simulator clobbering, "database is locked" or CPU-starvation flakes. Pain points, now addressed in SKILL.md/`xc`: disk dipping to 3.6-5 GiB stalled agents (now a size budget on xc's own cache, LRU eviction; not triggered by free space), compound commands refused in worktrees (now listed up front), `main` broken by two PRs that built alone (pre-PR recipe), previews unusable unattended (noted). Open: cold build per worktree (about 4-5 min).
 
 ## Design notes
 
