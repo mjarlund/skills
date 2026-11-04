@@ -1,0 +1,662 @@
+#!/usr/bin/env python3
+"""xc - race-free Xcode build/test/run for many agents sharing one machine.
+
+Isolation per git worktree (keyed by the worktree's real path):
+  * DerivedData        -> ~/Library/Caches/xc-parallel/<name>-<hash>/DerivedData
+  * Simulator          -> a dedicated simulator device "xcp-<name>-<hash>-<platform>"
+  * Result bundles/logs-> same state dir
+Coordination (flock, released automatically if the process dies):
+  * worktree lock      -> two commands in the SAME worktree queue instead of corrupting
+                          each other's build database / simulator
+  * compile slots      -> at most N concurrent compile phases machine-wide (CPU starvation
+                          is what makes concurrent test runs flaky), N = max(2, ncpu//3)
+Everything is stdlib Python 3.9+ plus xcodebuild/simctl/xcresulttool (Xcode 16+). No project config needed.
+Env: XC_BUILD_SLOTS, XC_DEVICE, XC_RUNTIME. State lives in ~/Library/Caches/xc-parallel.
+"""
+import argparse, fcntl, hashlib, json, os, re, shutil, signal, subprocess, sys, time
+
+CACHE = os.path.expanduser("~/Library/Caches/xc-parallel")
+PLATFORMS = {  # key -> (simctl platform name, xcodebuild destination platform)
+    "ios": ("iOS", "iOS Simulator"), "tvos": ("tvOS", "tvOS Simulator"),
+    "watchos": ("watchOS", "watchOS Simulator"), "visionos": ("visionOS", "visionOS Simulator"),
+    "macos": (None, "macOS"),
+}
+SKIP_DIRS = {"Pods", "Carthage", ".build", ".swiftpm", "node_modules", "DerivedData", ".git", "xcuserdata", ".claude"}
+HEARTBEAT = 45
+
+
+def log(msg):
+    print(f"[xc] {msg}", flush=True)
+
+
+def die(msg, code=2):
+    print(f"[xc] ERROR: {msg}", file=sys.stderr, flush=True)
+    sys.exit(code)
+
+
+def run(cmd, **kw):
+    return subprocess.run(cmd, capture_output=True, text=True, **kw)
+
+
+def jload(path, default):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+
+def jsave(path, obj):
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w") as f:
+        json.dump(obj, f, indent=2)
+    os.replace(tmp, path)  # atomic: concurrent readers never see half a file
+
+
+# ---------------------------------------------------------------- identity / state
+def worktree_root():
+    r = run(["git", "rev-parse", "--show-toplevel"])
+    return os.path.realpath(r.stdout.strip() if r.returncode == 0 else os.getcwd())
+
+
+class State:
+    def __init__(self):
+        self.root = worktree_root()
+        h = hashlib.sha1(self.root.encode()).hexdigest()[:6]
+        base = re.sub(r"[^A-Za-z0-9._-]", "-", os.path.basename(self.root))[:24]
+        self.key = f"{base}-{h}"
+        self.dir = os.path.join(CACHE, self.key)
+        self.derived = os.path.join(self.dir, "DerivedData")
+        self.logs = os.path.join(self.dir, "logs")
+        self.results = os.path.join(self.dir, "results")
+        for d in (self.dir, self.logs, self.results, os.path.join(CACHE, "slots")):
+            os.makedirs(d, exist_ok=True)
+        self.cfg_path = os.path.join(self.dir, "config.json")
+        self.meta_path = os.path.join(self.dir, "meta.json")
+        self.cfg = jload(self.cfg_path, {})
+        self.meta = jload(self.meta_path, {"sims": {}})
+        self.meta["path"] = self.root
+
+    def save(self):
+        jsave(self.cfg_path, self.cfg)
+        jsave(self.meta_path, self.meta)
+
+    def touch(self):
+        self.meta["last_used"] = time.time()
+        self.save()
+
+
+# ---------------------------------------------------------------- locks
+class Lock:
+    """flock-based; the kernel drops it if we crash, so no stale-lock cleanup is needed."""
+
+    def __init__(self, path, label):
+        self.path, self.label, self.fd = path, label, None
+
+    def try_acquire(self):
+        fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(fd)
+            return False
+        os.ftruncate(fd, 0)
+        os.write(fd, json.dumps({"pid": os.getpid(), "what": self.label, "since": time.time()}).encode())
+        self.fd = fd
+        return True
+
+    def holder(self):
+        j = jload(self.path, {})
+        return f"pid {j.get('pid')} ({j.get('what')})" if j else "unknown"
+
+    def acquire(self, waiting_for):
+        t0, last = time.time(), 0
+        while not self.try_acquire():
+            if time.time() - last > 15:
+                log(f"waiting for {waiting_for}: held by {self.holder()} ({int(time.time() - t0)}s)")
+                last = time.time()
+            time.sleep(0.5)
+        return self
+
+    def release(self):
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+
+    __enter__ = lambda self: self
+    __exit__ = lambda self, *a: self.release()
+
+
+def acquire_slot(label):
+    n = int(os.environ.get("XC_BUILD_SLOTS") or max(2, (os.cpu_count() or 8) // 3))
+    t0, last = time.time(), 0
+    while True:
+        for i in range(n):
+            lk = Lock(os.path.join(CACHE, "slots", f"compile-{i}.lock"), label)
+            if lk.try_acquire():
+                if time.time() - t0 > 2:
+                    log(f"got compile slot {i + 1}/{n} after {int(time.time() - t0)}s")
+                return lk
+        if time.time() - last > 15:
+            log(f"all {n} compile slots busy (machine-wide throttle, XC_BUILD_SLOTS to change); waiting {int(time.time() - t0)}s")
+            last = time.time()
+        time.sleep(0.7)
+
+
+# ---------------------------------------------------------------- project discovery
+def find_project(st, explicit):
+    if explicit:
+        p = os.path.abspath(explicit)
+        if not os.path.exists(p):
+            die(f"--project {explicit} not found")
+        return p
+    cached = st.cfg.get("project")
+    if cached and os.path.exists(cached):
+        return cached
+    found = []
+    for dp, dns, fns in os.walk(st.root):
+        depth = dp[len(st.root):].count(os.sep)
+        dns[:] = [d for d in dns if d not in SKIP_DIRS and not d.endswith((".xcodeproj", ".xcworkspace"))] if depth < 3 else []
+        for d in os.listdir(dp):
+            full = os.path.join(dp, d)
+            if d.endswith(".xcworkspace") and os.path.isdir(full):
+                found.append((depth, 0, full))
+            elif d.endswith(".xcodeproj") and os.path.isdir(full):
+                found.append((depth, 1, full))
+        if depth == 0 and "Package.swift" in fns:
+            found.append((0, 2, os.path.join(dp, "Package.swift")))
+    if not found:
+        die(f"no .xcworkspace/.xcodeproj/Package.swift under {st.root}")
+    found.sort()
+    best = [f for f in found if f[:2] == found[0][:2]]
+    if len(best) > 1:
+        die("several candidate projects, pick one with --project:\n  " + "\n  ".join(b[2] for b in best))
+    return best[0][2]
+
+
+def proj_args(proj):
+    if proj.endswith(".xcworkspace"):
+        return ["-workspace", proj], os.path.dirname(proj)
+    if proj.endswith(".xcodeproj"):
+        return ["-project", proj], os.path.dirname(proj)
+    return [], os.path.dirname(proj)  # Package.swift: run xcodebuild inside the dir
+
+
+def resolve_scheme(st, proj, args, pargs, cwd):
+    if args.scheme:
+        return args.scheme
+    if st.cfg.get("scheme"):
+        return st.cfg["scheme"]
+    r = run(["xcodebuild", "-list", "-json", "-skipPackageUpdates"] + pargs, cwd=cwd)
+    try:
+        d = json.loads(r.stdout[r.stdout.index("{"):])
+        schemes = (d.get("workspace") or d.get("project") or {}).get("schemes", [])
+    except Exception:
+        die("could not list schemes (pass --scheme):\n" + (r.stderr or r.stdout)[-600:])
+    if len(schemes) == 1:
+        return schemes[0]
+    if proj.endswith("Package.swift"):
+        pk = [s for s in schemes if s.endswith("-Package")]
+        if len(pk) == 1:
+            return pk[0]
+    base = os.path.splitext(os.path.basename(proj))[0]
+    for cand in (base, base + "-Package"):
+        if cand in schemes:
+            return cand
+    non_test = [s for s in schemes if not s.endswith(("Tests", "UITests"))]
+    if len(non_test) == 1:
+        return non_test[0]
+    die("several schemes, pick one with --scheme (it is remembered afterwards):\n  " + "\n  ".join(schemes))
+
+
+# ---------------------------------------------------------------- simulators
+def simctl_json(what):
+    r = run(["xcrun", "simctl", "list", "-j", what])
+    if r.returncode:
+        die("simctl failed: " + r.stderr[-300:])
+    return json.loads(r.stdout)
+
+
+def vkey(v):
+    return tuple(int(x) for x in re.findall(r"\d+", v))
+
+
+def pick_spec(plat, args):
+    pname = PLATFORMS[plat][0]
+    runtimes = [r for r in simctl_json("runtimes")["runtimes"] if r.get("isAvailable") and r.get("platform") == pname]
+    want = args.runtime or os.environ.get("XC_RUNTIME")
+    if want:
+        runtimes = [r for r in runtimes if r["version"].startswith(want)]
+    if not runtimes:
+        die(f"no available {pname} simulator runtime{' matching ' + want if want else ''}")
+    rt = max(runtimes, key=lambda r: vkey(r["version"]))
+    types = rt.get("supportedDeviceTypes", [])
+    name = args.device or os.environ.get("XC_DEVICE")
+    if name:
+        m = [t for t in types if t["name"] == name] or [t for t in types if name.lower() in t["name"].lower()]
+    elif plat == "ios":
+        phones = [t for t in types if re.fullmatch(r"iPhone \d+", t["name"])]
+        m = sorted(phones, key=lambda t: vkey(t["name"]))[-1:] or [t for t in types if t["name"].startswith("iPhone")][-1:]
+    else:
+        m = types[:1]
+    if not m:
+        die(f"no device type {name!r} for runtime {rt['name']}")
+    return {"runtime": rt["identifier"], "runtime_name": rt["name"], "devtype": m[0]["identifier"], "devtype_name": m[0]["name"]}
+
+
+def find_device(udid):
+    for rt, devs in simctl_json("devices")["devices"].items():
+        for d in devs:
+            if d["udid"] == udid and d.get("isAvailable", True):
+                return rt, d
+    return None
+
+
+def clone_from_template(name, spec):
+    """A brand-new simulator needs a ~65s first boot (data migration); a clone of a device that
+    has booted once boots in ~5s. So keep one warmed, shut-down template per device spec, and
+    clone it for every worktree. Template creation/cloning is serialised machine-wide (cheap)."""
+    tname = "xcp-template-" + hashlib.sha1((spec["devtype"] + spec["runtime"]).encode()).hexdigest()[:8]
+    with Lock(os.path.join(CACHE, "slots", f"{tname}.lock"), "template").acquire("simulator template warm-up (one-time, ~1 min)"):
+        tpl = None
+        for rt, devs in simctl_json("devices")["devices"].items():
+            for d in devs:
+                if d["name"] == tname and d.get("isAvailable", True):
+                    tpl = d["udid"]
+        if not tpl:
+            r = run(["xcrun", "simctl", "create", tname, spec["devtype"], spec["runtime"]])
+            if r.returncode:
+                die("simctl create failed: " + r.stderr.strip())
+            tpl = r.stdout.strip()
+            log(f"warming simulator template {tname} (one-time per device/runtime, ~1 min)")
+            r = run(["xcrun", "simctl", "bootstatus", tpl, "-b"])
+            if r.returncode:
+                die("template boot failed: " + (r.stderr or r.stdout)[-300:])
+        run(["xcrun", "simctl", "shutdown", tpl])  # clone requires Shutdown; harmless if already
+        r = run(["xcrun", "simctl", "clone", tpl, name])
+        if r.returncode:
+            die("simctl clone failed: " + r.stderr.strip())
+        return r.stdout.strip()
+
+
+def ensure_sim(st, plat, args, boot=True):
+    """Return UDID of this worktree's private simulator, creating/booting as needed."""
+    sims = st.meta.setdefault("sims", {})
+    entry = sims.get(plat)
+    explicit = bool(args.device or args.runtime)
+    if explicit:  # remember so later commands keep the same device
+        st.cfg["device"] = args.device or st.cfg.get("device")
+        st.cfg["runtime"] = args.runtime or st.cfg.get("runtime")
+    args.device = args.device or st.cfg.get("device")
+    args.runtime = args.runtime or st.cfg.get("runtime")
+    spec = pick_spec(plat, args)
+    if entry and find_device(entry["udid"]) and entry["spec"] == spec:
+        udid = entry["udid"]
+    else:
+        if entry and find_device(entry["udid"]):
+            log(f"device spec changed -> recreating simulator ({spec['devtype_name']}, {spec['runtime_name']})")
+            run(["xcrun", "simctl", "shutdown", entry["udid"]])
+            run(["xcrun", "simctl", "delete", entry["udid"]])
+        name = f"xcp-{st.key}-{plat}"
+        with Lock(os.path.join(CACHE, "slots", "create.lock"), "sim-create").acquire("another simulator being created"):
+            udid = clone_from_template(name, spec)
+            sims[plat] = {"udid": udid, "spec": spec, "name": name}
+            st.save()  # recorded before gc (which also takes create.lock) can see it as an orphan
+        log(f"created private simulator {name} = {udid} ({spec['devtype_name']}, {spec['runtime_name']})")
+    st.save()
+    if boot:
+        found = find_device(udid)
+        if found and found[1]["state"] != "Booted":
+            t0 = time.time()
+            r = run(["xcrun", "simctl", "bootstatus", udid, "-b"])
+            if r.returncode:
+                die("simulator boot failed: " + (r.stderr or r.stdout)[-400:])
+            log(f"booted simulator in {int(time.time() - t0)}s")
+    return udid
+
+
+def destination(st, plat, args, boot=True):
+    if plat == "macos":
+        return "platform=macOS", None
+    udid = ensure_sim(st, plat, args, boot)
+    return f"platform={PLATFORMS[plat][1]},id={udid}", udid
+
+
+# ---------------------------------------------------------------- xcodebuild runner
+KEEP = re.compile(r"(error:|\*\* (BUILD|TEST)|Test Case .* failed|✘|Testing failed|fatal error|Failing tests:|Executed \d+ tests|Test run with|Build succeeded|Build failed)")
+current = {"proc": None}
+
+
+def _forward(sig, _):
+    p = current["proc"]
+    if p and p.poll() is None:
+        try:
+            os.killpg(p.pid, signal.SIGTERM)
+            p.wait(timeout=20)
+        except Exception:
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except Exception:
+                pass
+    sys.exit(128 + sig)
+
+
+def run_xcodebuild(st, cmd, cwd, tag):
+    logf = os.path.join(st.logs, f"{time.strftime('%Y%m%d-%H%M%S')}-{tag}.log")
+    for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(s, _forward)
+    t0, last_beat, shown = time.time(), time.time(), 0
+    with open(logf, "w") as lf:
+        lf.write("$ " + " ".join(cmd) + "\n")
+        p = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace", start_new_session=True)
+        current["proc"] = p
+        import threading, queue
+        q = queue.Queue()
+        def pump():
+            for l in p.stdout:
+                q.put(l)
+            q.put(None)
+        threading.Thread(target=pump, daemon=True).start()
+        while True:
+            try:
+                line = q.get(timeout=5)
+            except queue.Empty:
+                line = ""
+            if line is None:
+                break
+            if line:
+                lf.write(line)
+                if KEEP.search(line) and shown < 200:
+                    print(line.rstrip(), flush=True)
+                    shown += 1
+            if time.time() - last_beat > HEARTBEAT:
+                log(f"{tag} still running ({int(time.time() - t0)}s) - full log: {logf}")
+                last_beat = time.time()
+        rc = p.wait()
+    current["proc"] = None
+    log(f"{tag}: exit {rc} in {int(time.time() - t0)}s - full log: {logf}")
+    return rc
+
+
+def common_args(st, proj, pargs, scheme, dest, args):
+    a = pargs + ["-scheme", scheme, "-destination", dest, "-derivedDataPath", st.derived, "-skipPackageUpdates"]
+    if args.configuration:
+        a += ["-configuration", args.configuration]
+    return a
+
+
+def summarize_results(path):
+    r = run(["xcrun", "xcresulttool", "get", "test-results", "summary", "--path", path])
+    if r.returncode:
+        log("(could not read result bundle: " + r.stderr.strip()[:200] + ")")
+        return None
+    try:
+        d = json.loads(r.stdout)
+    except Exception:
+        return None
+    log(f"tests: {d.get('result')} - passed {d.get('passedTests')}, failed {d.get('failedTests')}, skipped {d.get('skippedTests')}, total {d.get('totalTestCount')}")
+    for f in d.get("testFailures", [])[:40]:
+        print(f"  FAIL {f.get('targetName', '')}/{f.get('testName', '')}: {f.get('failureText', '')}", flush=True)
+    return d
+
+
+# ---------------------------------------------------------------- commands
+def prelude(args):
+    st = State()
+    free = shutil.disk_usage(CACHE).free / 2**30
+    if free < 3:
+        die(f"only {free:.1f} GiB free - builds and simulators need space. Run `xc gc`, delete old worktrees, or clear ~/Library/Developer/Xcode/DerivedData")
+    if free < 10:
+        log(f"WARNING: only {free:.1f} GiB free; every worktree keeps its own DerivedData + simulator")
+    opportunistic_gc(st)
+    plat = args.platform or st.cfg.get("platform") or "ios"
+    if args.platform:
+        st.cfg["platform"] = plat
+    proj = find_project(st, args.project)
+    pargs, cwd = proj_args(proj)
+    st.cfg["project"] = proj
+    scheme = resolve_scheme(st, proj, args, pargs, cwd)
+    st.cfg["scheme"] = scheme
+    st.save()
+    return st, plat, proj, pargs, cwd, scheme
+
+
+def cmd_build(args, extra):
+    st, plat, proj, pargs, cwd, scheme = prelude(args)
+    with Lock(os.path.join(st.dir, "worktree.lock"), f"build {st.key}").acquire("another xc command in this worktree"):
+        st.touch()
+        dest, _ = destination(st, plat, args)
+        slot = acquire_slot(f"build {st.key}")
+        try:
+            rc = run_xcodebuild(st, ["xcodebuild", "build"] + common_args(st, proj, pargs, scheme, dest, args) + extra, cwd, "build")
+        finally:
+            slot.release()
+    return rc
+
+
+def cmd_test(args, extra):
+    st, plat, proj, pargs, cwd, scheme = prelude(args)
+    with Lock(os.path.join(st.dir, "worktree.lock"), f"test {st.key}").acquire("another xc command in this worktree"):
+        st.touch()
+        dest, _ = destination(st, plat, args)
+        base = common_args(st, proj, pargs, scheme, dest, args)
+        if args.plan:
+            base += ["-testPlan", args.plan]
+        base += ["-parallel-testing-enabled", "YES" if args.parallel else "NO"]
+        only = [x for t in (args.only or []) for x in ("-only-testing:" + t,)]
+        slot = acquire_slot(f"build-for-testing {st.key}")
+        try:
+            rc = run_xcodebuild(st, ["xcodebuild", "build-for-testing"] + base + extra, cwd, "build-for-testing")
+        finally:
+            slot.release()  # test execution is not CPU-gated; only compiling is
+        if rc:
+            return rc
+        rb = os.path.join(st.results, f"test-{time.strftime('%Y%m%d-%H%M%S')}.xcresult")
+        rc = run_xcodebuild(st, ["xcodebuild", "test-without-building"] + base + only + ["-resultBundlePath", rb] + extra, cwd, "test")
+        if os.path.exists(rb):
+            log(f"result bundle: {rb}")
+            summarize_results(rb)
+    return rc
+
+
+def cmd_run(args, extra):
+    st, plat, proj, pargs, cwd, scheme = prelude(args)
+    if plat == "macos":
+        die("`run` supports simulator platforms; for macOS launch the built .app from DerivedData with `open`")
+    with Lock(os.path.join(st.dir, "worktree.lock"), f"run {st.key}").acquire("another xc command in this worktree"):
+        st.touch()
+        dest, udid = destination(st, plat, args)
+        ca = common_args(st, proj, pargs, scheme, dest, args)
+        slot = acquire_slot(f"build {st.key}")
+        try:
+            rc = run_xcodebuild(st, ["xcodebuild", "build"] + ca + extra, cwd, "build")
+        finally:
+            slot.release()
+        if rc:
+            return rc
+        r = run(["xcodebuild", "-showBuildSettings", "-json"] + ca, cwd=cwd)
+        app = None
+        try:
+            for t in json.loads(r.stdout[r.stdout.index("["):]):
+                s = t["buildSettings"]
+                if s.get("WRAPPER_EXTENSION") == "app":
+                    app = (os.path.join(s["TARGET_BUILD_DIR"], s["FULL_PRODUCT_NAME"]), s["PRODUCT_BUNDLE_IDENTIFIER"])
+                    break
+        except Exception:
+            pass
+        if not app:
+            die("scheme has no .app product to launch")
+        for step in (["install", udid, app[0]], ["launch", "--terminate-running-process", udid, app[1]]):
+            r = run(["xcrun", "simctl"] + step)
+            if r.returncode:
+                die(f"simctl {step[0]} failed: {r.stderr.strip()}")
+        log(f"launched {app[1]} on {udid}: {r.stdout.strip()}")
+        log(f"screenshot: xcrun simctl io {udid} screenshot /tmp/shot.png | logs: xcrun simctl spawn {udid} log stream --predicate 'process == \"{os.path.splitext(os.path.basename(app[0]))[0]}\"'")
+    return 0
+
+
+def cmd_sim(args, extra):
+    st = State()
+    plat = args.platform or st.cfg.get("platform") or "ios"
+    with Lock(os.path.join(st.dir, "worktree.lock"), f"sim {st.key}").acquire("another xc command in this worktree"):
+        st.touch()
+        udid = ensure_sim(st, plat, args)
+    print(udid)
+    return 0
+
+
+def cmd_env(args, extra):
+    st = State()
+    plat = args.platform or st.cfg.get("platform") or "ios"
+    udid = ensure_sim(st, plat, args) if plat != "macos" else ""
+    print(f"export XC_SIM_UDID={udid}\nexport XC_DERIVED_DATA='{st.derived}'\nexport XC_STATE_DIR='{st.dir}'")
+    return 0
+
+
+def cmd_status(args, extra):
+    st = State()
+    print(f"worktree : {st.root}\nstate    : {st.dir}\nconfig   : {json.dumps(st.cfg)}")
+    for plat, e in st.meta.get("sims", {}).items():
+        f = find_device(e["udid"])
+        print(f"sim      : {plat} {e['udid']} {f[1]['state'] if f else 'MISSING'} ({e['spec']['devtype_name']}, {e['spec']['runtime_name']})")
+    n = int(os.environ.get("XC_BUILD_SLOTS") or max(2, (os.cpu_count() or 8) // 3))
+    busy = []
+    for i in range(n):
+        p = os.path.join(CACHE, "slots", f"compile-{i}.lock")
+        lk = Lock(p, "probe")
+        if lk.try_acquire():
+            lk.release()
+            if os.path.exists(p):
+                open(p, "w").close()  # clear stale holder text
+        else:
+            busy.append(lk.holder())
+    sz = run(["du", "-sh", st.dir]).stdout.split()[0] if os.path.isdir(st.dir) else "0"
+    print(f"disk     : {sz} in this worktree's state; {shutil.disk_usage(CACHE).free / 2**30:.0f} GiB free on volume")
+    print(f"slots    : {len(busy)}/{n} compile slots busy {busy if busy else ''}")
+    print("others   : " + ", ".join(sorted(d for d in os.listdir(CACHE) if d not in ('slots',) and os.path.isdir(os.path.join(CACHE, d)))))
+    return 0
+
+
+def delete_sim(udid):
+    run(["xcrun", "simctl", "shutdown", udid])
+    run(["xcrun", "simctl", "delete", udid])
+
+
+def gc(verbose=True, idle_min=45):
+    known = set()
+    now = time.time()
+    for d in os.listdir(CACHE) if os.path.isdir(CACHE) else []:
+        sd = os.path.join(CACHE, d)
+        meta = jload(os.path.join(sd, "meta.json"), None)
+        if not meta:
+            continue
+        sims = meta.get("sims", {})
+        if not os.path.isdir(meta.get("path", "")):  # worktree gone -> reclaim everything
+            for e in sims.values():
+                delete_sim(e["udid"])
+            shutil.rmtree(sd, ignore_errors=True)
+            verbose and log(f"reclaimed state of removed worktree {meta.get('path')}")
+            continue
+        for e in sims.values():
+            known.add(e["udid"])
+        wl = Lock(os.path.join(sd, "worktree.lock"), "gc")
+        if wl.try_acquire():  # nobody is using it right now
+            if now - meta.get("last_used", 0) > idle_min * 60:
+                for e in sims.values():
+                    f = find_device(e["udid"])
+                    if f and f[1]["state"] == "Booted":
+                        run(["xcrun", "simctl", "shutdown", e["udid"]])
+                        verbose and log(f"shut down idle simulator {e['name']}")
+            dd = os.path.join(sd, "DerivedData")
+            if os.path.isdir(dd) and now - meta.get("last_used", 0) > 14 * 86400:
+                shutil.rmtree(dd, ignore_errors=True)  # stale worktree: reclaim GBs, rebuilt on demand
+                verbose and log(f"dropped DerivedData of {d} (unused 14d)")
+            for sub in ("logs", "results"):
+                p = os.path.join(sd, sub)
+                for f in os.listdir(p) if os.path.isdir(p) else []:
+                    fp = os.path.join(p, f)
+                    if now - os.path.getmtime(fp) > 3 * 86400:
+                        shutil.rmtree(fp, ignore_errors=True) if os.path.isdir(fp) else os.remove(fp)
+            wl.release()
+    with Lock(os.path.join(CACHE, "slots", "create.lock"), "gc-orphans").acquire("simulator creation to finish"):
+        known = set()
+        for d in os.listdir(CACHE):
+            meta = jload(os.path.join(CACHE, d, "meta.json"), None)
+            if meta and os.path.isdir(meta.get("path", "")):
+                known |= {e["udid"] for e in meta.get("sims", {}).values()}
+        for rt, devs in simctl_json("devices")["devices"].items():  # sims we created but lost track of
+            for dv in devs:
+                if dv["name"].startswith("xcp-") and not dv["name"].startswith("xcp-template-") and dv["udid"] not in known:
+                    delete_sim(dv["udid"])
+                    verbose and log(f"deleted orphan simulator {dv['name']}")
+    os.makedirs(CACHE, exist_ok=True)
+    open(os.path.join(CACHE, "last_gc"), "w").write(str(now))
+
+
+def opportunistic_gc(st):
+    p = os.path.join(CACHE, "last_gc")
+    if os.path.exists(p) and time.time() - os.path.getmtime(p) < 6 * 3600:
+        return
+    gl = Lock(os.path.join(CACHE, "slots", "gc.lock"), "gc")
+    if gl.try_acquire():
+        try:
+            gc(verbose=True)
+        finally:
+            gl.release()
+
+
+def cmd_gc(args, extra):
+    gc(idle_min=args.idle)
+    return 0
+
+
+def cmd_reset_sim(args, extra):
+    st = State()
+    plat = args.platform or st.cfg.get("platform") or "ios"
+    e = st.meta.get("sims", {}).get(plat)
+    if not e:
+        die("no simulator for this worktree yet")
+    with Lock(os.path.join(st.dir, "worktree.lock"), "reset-sim").acquire("another xc command in this worktree"):
+        run(["xcrun", "simctl", "shutdown", e["udid"]])
+        r = run(["xcrun", "simctl", "erase", e["udid"]])
+        log("erased" if not r.returncode else "erase failed: " + r.stderr)
+    return r.returncode
+
+
+def main():
+    argv = sys.argv[1:]
+    extra = []
+    if "--" in argv:
+        i = argv.index("--")
+        argv, extra = argv[:i], argv[i + 1:]
+    ap = argparse.ArgumentParser(prog="xc", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--project", help="path to .xcworkspace/.xcodeproj/Package.swift (auto-detected, remembered)")
+    common.add_argument("--scheme", help="scheme (auto-detected when unambiguous, remembered)")
+    common.add_argument("--platform", choices=list(PLATFORMS), help="default ios (remembered)")
+    common.add_argument("--device", help="simulator device type name, e.g. 'iPhone 17' (default: newest iPhone)")
+    common.add_argument("--runtime", help="simulator runtime version prefix, e.g. 18.5 (default: newest)")
+    common.add_argument("--configuration", help="Debug/Release (default: scheme's)")
+    for n, f, h in (("build", cmd_build, "build for this worktree's simulator"),
+                    ("test", cmd_test, "build-for-testing then test-without-building, summarised"),
+                    ("run", cmd_run, "build, install and launch on the private simulator"),
+                    ("sim", cmd_sim, "print UDID of this worktree's private (booted) simulator"),
+                    ("env", cmd_env, "print export lines: XC_SIM_UDID, XC_DERIVED_DATA"),
+                    ("status", cmd_status, "show identity, simulator, compile-slot usage"),
+                    ("reset-sim", cmd_reset_sim, "erase this worktree's simulator"),
+                    ("gc", cmd_gc, "reclaim state/sims of removed worktrees, stop idle sims")):
+        p = sub.add_parser(n, parents=[common], help=h)
+        p.set_defaults(fn=f)
+        if n == "test":
+            p.add_argument("--only", action="append", help="Target[/Class[/test]] (repeatable)")
+            p.add_argument("--plan", help="test plan name")
+            p.add_argument("--parallel", action="store_true", help="enable Xcode parallel testing (clones simulators; heavier)")
+        if n == "gc":
+            p.add_argument("--idle", type=int, default=45, help="minutes before an idle simulator is shut down")
+    args = ap.parse_args(argv)
+    sys.exit(args.fn(args, extra))
+
+
+if __name__ == "__main__":
+    main()
