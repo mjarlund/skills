@@ -1,0 +1,4 @@
+schema_version: "1.1"
+name: stops-runaway-run
+expected_outcome: |
+  Agent stops its own run with xc stop (or TaskStop), never pkill/killall, then reruns scoped with --only.

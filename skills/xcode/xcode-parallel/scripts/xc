@@ -400,6 +400,12 @@ def run_xcodebuild(st, cmd, cwd, tag):
         rc = p.wait()
     current["proc"] = None
     log(f"{tag}: exit {rc} in {int(time.time() - t0)}s - full log: {logf}")
+    if rc:
+        try:
+            if "not currently configured for the test action" in open(logf, errors="replace").read():
+                log(f"HINT: scheme has no test action (build-only). Pick a scheme that has tests: `xcodebuild -list`, then --scheme X, or --plan.")
+        except OSError:
+            pass
     LAST["log"] = logf
     return rc
 
@@ -729,6 +735,38 @@ def cmd_gc(args, extra):
     return 0
 
 
+def cmd_stop(args, extra):
+    """Stop this worktree's running xc command (and its xcodebuild). Use instead of pkill, which harnesses deny."""
+    st = State()
+    j = jload(os.path.join(st.dir, "worktree.lock"), {})
+    pid = j.get("pid")
+    probe = Lock(os.path.join(st.dir, "worktree.lock"), "probe")
+    if probe.try_acquire():  # nobody holds it
+        probe.release()
+        log("nothing running in this worktree")
+        return 0
+    if not pid:
+        die("a command holds the worktree lock but its pid is unknown")
+    log(f"stopping {j.get('what')} (pid {pid}); SIGTERM first, SIGKILL after 20s")
+    try:
+        os.kill(pid, signal.SIGTERM)  # xc forwards it to xcodebuild and exits
+    except ProcessLookupError:
+        return 0
+    for _ in range(40):
+        time.sleep(0.5)
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            log("stopped")
+            return 0
+    kids = run(["pgrep", "-P", str(pid)]).stdout.split()  # xcodebuild runs in its own session
+    for k in kids + [str(pid)]:
+        run(["kill", "-KILL", k])
+        run(["pkill", "-KILL", "-P", k])
+    log("killed (it ignored SIGTERM, e.g. a hung test); the worktree lock is released")
+    return 0
+
+
 def cmd_reset_sim(args, extra):
     st = State()
     plat = args.platform or st.cfg.get("platform") or "ios"
@@ -763,6 +801,7 @@ def main():
                     ("sim", cmd_sim, "print UDID of this worktree's private (booted) simulator"),
                     ("env", cmd_env, "print export lines: XC_SIM_UDID, XC_DERIVED_DATA"),
                     ("status", cmd_status, "show identity, simulator, compile-slot usage"),
+                    ("stop", cmd_stop, "stop this worktree's running xc command (use instead of pkill)"),
                     ("reset-sim", cmd_reset_sim, "erase this worktree's simulator"),
                     ("guard-snippet", cmd_guard_snippet, "print the settings.json hook that blocks raw xcodebuild/simctl"),
                     ("gc", cmd_gc, "reclaim state/sims of removed worktrees, stop idle sims")):
