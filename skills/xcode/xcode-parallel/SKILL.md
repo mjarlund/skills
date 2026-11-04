@@ -77,4 +77,6 @@ So build, test and run with `xc`. Reach for the MCP only for things the CLI cann
 - Not isolatable by `xc`: fixed TCP ports used by tests or local servers, shared on-disk fixture paths outside the repo, shared remote test accounts. Make those per-worktree, for example by deriving them from the simulator UDID (`xc env` prints `XC_SIM_UDID`).
 - For Swift packages that do not need a simulator, plain `swift test` in the worktree is already isolated by its own `.build`; no wrapper needed.
 
-Design notes, all flags and the concurrency self-test (`tests/selftest.sh`) are in [REFERENCE.md](REFERENCE.md).
+If a hook denies a raw `xcodebuild`/`simctl` command, that is this skill's guard (`scripts/xc-guard`): rerun it through `xc` as the message says rather than looking for a way around it.
+
+Design notes, all flags, the guard hook setup and the concurrency self-test (`tests/selftest.sh`) are in [REFERENCE.md](REFERENCE.md).

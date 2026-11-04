@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+"""xc-guard - optional Claude Code PreToolUse hook (matcher: Bash).
+
+Turns the xcode-parallel skill from a suggestion into a rule: when the repo has more than one
+git worktree (i.e. other agents may be building), raw `xcodebuild build|test|...` and `simctl`
+calls that use shared state are denied with a message pointing at `xc`. Read-only commands
+(`xcodebuild -list/-showBuildSettings/-version`, `simctl list/io/spawn/openurl`) always pass.
+
+  XC_GUARD=off      never block          XC_GUARD=warn    allow, but tell the agent
+  XC_GUARD=always   block even with a single worktree (default: only with 2+ worktrees)
+
+Install: run `xc guard-snippet` and merge the printed JSON into ~/.claude/settings.json.
+Fails open: any parse problem allows the command.
+"""
+import json, os, re, shlex, subprocess, sys
+
+BUILD_ACTIONS = {"build", "test", "build-for-testing", "test-without-building", "archive", "analyze", "install", "installsrc", "clean"}
+SIMCTL_DESTRUCTIVE = {"boot", "shutdown", "erase", "delete", "clone", "create"}  # fine only on this worktree's own simulator
+CACHE = os.path.expanduser("~/Library/Caches/xc-parallel")
+
+
+def own_udids(cwd):
+    """UDIDs of the simulators xc created for the worktree containing cwd."""
+    try:
+        top = os.path.realpath(subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=cwd, capture_output=True, text=True, timeout=5).stdout.strip())
+        for d in os.listdir(CACHE):
+            try:
+                m = json.load(open(os.path.join(CACHE, d, "meta.json")))
+            except Exception:
+                continue
+            if os.path.realpath(m.get("path", "")) == top:
+                return {e["udid"] for e in m.get("sims", {}).values()}
+    except Exception:
+        pass
+    return set()
+
+
+def allow():
+    sys.exit(0)
+
+
+def respond(kind, reason):
+    out = {"hookSpecificOutput": {"hookEventName": "PreToolUse"}}
+    if kind == "deny":
+        out["hookSpecificOutput"].update(permissionDecision="deny", permissionDecisionReason=reason)
+    else:
+        out["hookSpecificOutput"]["additionalContext"] = reason
+    print(json.dumps(out))
+    sys.exit(0)
+
+
+def worktree_count(cwd):
+    try:
+        r = subprocess.run(["git", "worktree", "list", "--porcelain"], cwd=cwd, capture_output=True, text=True, timeout=5)
+        return r.stdout.count("\nworktree ") + (1 if r.stdout.startswith("worktree ") else 0)
+    except Exception:
+        return 1
+
+
+def segments(cmd):
+    """Split a shell line on ; && || | so `cd x && xcodebuild test` is inspected per command."""
+    for part in re.split(r"&&|\|\||;|\||\n", cmd):
+        try:
+            yield shlex.split(part)
+        except ValueError:
+            yield part.split()
+
+
+def violation(argv, own=frozenset()):
+    # strip leading env assignments and wrappers
+    while argv and (re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", argv[0]) or argv[0] in ("time", "env", "nohup", "command")):
+        argv = argv[1:]
+    if not argv:
+        return None
+    exe = os.path.basename(argv[0])
+    rest = argv[1:]
+    if exe == "xcrun" and rest:  # xcrun xcodebuild ... / xcrun simctl ...
+        exe, rest = os.path.basename(rest[0]), rest[1:]
+    if exe == "xcodebuild":
+        if any(a in BUILD_ACTIONS for a in rest):
+            return "raw `xcodebuild` uses DerivedData and a simulator that other agents on this Mac share"
+    if exe == "simctl":
+        sub = rest[0] if rest else ""
+        if sub in SIMCTL_DESTRUCTIVE and not (len(rest) > 1 and rest[1] in own):
+            return f"`simctl {sub}` acts on simulators other agents may be using"
+        if "booted" in rest and sub not in ("list",):
+            return "`booted` resolves to whichever simulator some other agent booted"
+    return None
+
+
+def main():
+    mode = os.environ.get("XC_GUARD", "")
+    if mode == "off":
+        allow()
+    try:
+        ev = json.load(sys.stdin)
+        if ev.get("tool_name") != "Bash":
+            allow()
+        cmd = ev["tool_input"]["command"]
+        cwd = ev.get("cwd") or os.getcwd()
+    except Exception:
+        allow()
+    own = own_udids(cwd)
+    why = next((v for v in (violation(a, own) for a in segments(cmd)) if v), None)
+    if not why:
+        allow()
+    if mode != "always" and worktree_count(cwd) < 2:
+        allow()
+    xc = os.path.join(os.path.dirname(os.path.abspath(__file__)), "xc")
+    msg = (f"xcode-parallel guard: {why}. Use `python3 {xc} test|build|run|sim` instead "
+           f"(private DerivedData and simulator per worktree; `xc sim` prints your simulator UDID for simctl io/spawn/openurl). "
+           f"Read the xcode-parallel skill if unsure.")
+    respond("warn" if mode == "warn" else "deny", msg)
+
+
+if __name__ == "__main__":
+    main()

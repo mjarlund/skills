@@ -605,6 +605,13 @@ def opportunistic_gc(st):
             gl.release()
 
 
+def cmd_guard_snippet(args, extra):
+    guard = os.path.join(os.path.dirname(os.path.abspath(__file__)), "xc-guard")
+    print(json.dumps({"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": f"python3 {guard}"}]}]}}, indent=2))
+    print("\n# Merge into ~/.claude/settings.json (or a project .claude/settings.json). XC_GUARD=warn|off|always tunes it.", file=sys.stderr)
+    return 0
+
+
 def cmd_gc(args, extra):
     gc(idle_min=args.idle)
     return 0
@@ -645,6 +652,7 @@ def main():
                     ("env", cmd_env, "print export lines: XC_SIM_UDID, XC_DERIVED_DATA"),
                     ("status", cmd_status, "show identity, simulator, compile-slot usage"),
                     ("reset-sim", cmd_reset_sim, "erase this worktree's simulator"),
+                    ("guard-snippet", cmd_guard_snippet, "print the settings.json hook that blocks raw xcodebuild/simctl"),
                     ("gc", cmd_gc, "reclaim state/sims of removed worktrees, stop idle sims")):
         p = sub.add_parser(n, parents=[common], help=h)
         p.set_defaults(fn=f)
