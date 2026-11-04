@@ -42,7 +42,7 @@ First use in a worktree creates its simulator by cloning a warmed template (abou
 
 ## Project map: write it down once
 
-Which scheme runs what is project knowledge that every agent otherwise rediscovers (in one project: package tests live in one aggregate scheme run from `packages/`; per-package schemes have no test action; the app scheme builds but has no test action; app tests run from the app project; app code has no CI). `xc` remembers the project and scheme per repo, but not that map. If the repo's `AGENTS.md`/`CLAUDE.md` has none, add a short one the first time you work it out: for each of "package tests", "app build", "app tests", the exact `xc` command, `--project` and `--scheme`, and which code has no CI. A scheme with no test action fails with a hint saying so.
+Which scheme runs what is project knowledge that every agent otherwise rediscovers (for example: tests may live in an aggregate scheme rather than per-package schemes, the app scheme may build but have no test action, app tests may run from a different project than package tests, and some code may have no CI). `xc` remembers the project and scheme per repo, but not that map. If the repo's `AGENTS.md`/`CLAUDE.md` has none, add a short one the first time you work it out: for each of "package tests", "app build", "app tests", the exact `xc` command, `--project` and `--scheme`, and which code has no CI. A scheme with no test action fails with a hint saying so.
 
 ## Before opening a PR
 
