@@ -21,6 +21,7 @@ PLATFORMS = {  # key -> (simctl platform name, xcodebuild destination platform)
     "watchos": ("watchOS", "watchOS Simulator"), "visionos": ("visionOS", "visionOS Simulator"),
     "macos": (None, "macOS"),
 }
+SHARED_KEYS = ("project", "scheme", "platform", "device", "runtime")
 SKIP_DIRS = {"Pods", "Carthage", ".build", ".swiftpm", "node_modules", "DerivedData", ".git", "xcuserdata", ".claude"}
 HEARTBEAT = 45
 
@@ -76,10 +77,27 @@ class State:
         self.cfg = jload(self.cfg_path, {})
         self.meta = jload(self.meta_path, {"sims": {}})
         self.meta["path"] = self.root
+        # Choices (project, scheme, device...) are shared by every worktree of the same repo, so a new
+        # worktree or sub-agent does not have to pick again. Keyed by the repo's common git dir.
+        cd = run(["git", "rev-parse", "--git-common-dir"], cwd=self.root).stdout.strip()
+        rk = hashlib.sha1(os.path.realpath(os.path.join(self.root, cd)).encode()).hexdigest()[:8] if cd else None
+        self.repo_path = os.path.join(CACHE, f"repo-{rk}.json") if rk else None
+        repo = jload(self.repo_path, {}) if self.repo_path else {}
+        for k in SHARED_KEYS:
+            if k not in self.cfg and k in repo:
+                v = repo[k]
+                self.cfg[k] = os.path.join(self.root, v[2:]) if k == "project" and v.startswith("./") else v
 
     def save(self):
         jsave(self.cfg_path, self.cfg)
         jsave(self.meta_path, self.meta)
+        if self.repo_path:
+            repo = jload(self.repo_path, {})
+            for k in SHARED_KEYS:
+                v = self.cfg.get(k)
+                if v:
+                    repo[k] = "./" + os.path.relpath(v, self.root) if k == "project" and v.startswith(self.root + os.sep) else v
+            jsave(self.repo_path, repo)
 
     def touch(self):
         self.meta["last_used"] = time.time()
@@ -206,7 +224,9 @@ def resolve_scheme(st, proj, args, pargs, cwd):
     non_test = [s for s in schemes if not s.endswith(("Tests", "UITests"))]
     if len(non_test) == 1:
         return non_test[0]
-    die("several schemes, pick one with --scheme (it is remembered afterwards):\n  " + "\n  ".join(schemes))
+    shown = sorted(schemes, key=lambda x: (not x.endswith("-Package"), " " not in x, x))[:15]
+    more = f"\n  ... {len(schemes) - 15} more (xcodebuild -list)" if len(schemes) > 15 else ""
+    die("several schemes, pick one with --scheme. It is remembered for every worktree of this repo, so this is a one-time choice:\n  " + "\n  ".join(shown) + more)
 
 
 # ---------------------------------------------------------------- simulators

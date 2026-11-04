@@ -22,6 +22,8 @@ xc run                                   # build, install and launch on the priv
 xc sim                                   # prints this worktree's simulator UDID (booted)
 ```
 
+Project docs (AGENTS.md, testing guides) often say to run `xcodebuild test -destination id=<booted simulator>`. Those commands were written for one agent. Keep their scheme and scope but run them through `xc` (`-only-testing:A/B` becomes `--only A/B`, `-scheme X` becomes `--scheme X`), because a booted simulator is shared by every agent on the machine.
+
 Do not call `xcodebuild ... -destination` or `simctl boot booted` yourself, and do not pick a simulator from `simctl list`. Those are the shared resources other agents are using; `xc` hands you a private one. For raw xcodebuild flags, pass them after `--`: `xc build -- -configuration Release`.
 
 Builds take minutes and many agent shells time out around 10 minutes, so run `xc test` in the background when the project is large and read the log path it prints instead of re-running. Output is already reduced to errors, test failures and a result summary; the full log path is printed at the end.
@@ -72,7 +74,7 @@ So build, test and run with `xc`. Reach for the MCP only for things the CLI cann
 - `xc status`: identity, simulator state, compile-slot usage, disk use.
 - `xc gc`: also runs automatically at most every 6 h. Reclaims simulators and state of removed worktrees, shuts down simulators idle 45+ min (a booted simulator costs about 1 GB RAM), drops DerivedData unused for 14 days. `xc` only ever creates and deletes simulators named `xcp-*`; the user's own are untouched.
 - Disk: each worktree holds a DerivedData plus a simulator. `xc` refuses to start below 3 GiB free and warns below 10 GiB. If the disk fills, delete `~/Library/Caches/xc-parallel`; the next run rebuilds and `xc` recovers by itself.
-- Ambiguity: several projects or schemes make `xc` stop and list them. Pick with `--project` / `--scheme`; the choice is remembered per worktree. `--device "iPhone 17"`, `--runtime 18.5`, `--platform tvos|watchos|visionos|macos` work the same way (env: `XC_DEVICE`, `XC_RUNTIME`).
+- Ambiguity: several projects or schemes make `xc` stop and list them. Pick with `--project` / `--scheme`; the choice is remembered for every worktree of the same repo, so it is made once (large workspaces can have 30+ schemes). `--device "iPhone 17"`, `--runtime 18.5`, `--platform tvos|watchos|visionos|macos` work the same way (env: `XC_DEVICE`, `XC_RUNTIME`).
 - `waiting for ...` lines mean another agent holds a lock or all compile slots. Wait; it is cheaper than a conflict. Do not kill other agents' processes.
 - Not isolatable by `xc`: fixed TCP ports used by tests or local servers, shared on-disk fixture paths outside the repo, shared remote test accounts. Make those per-worktree, for example by deriving them from the simulator UDID (`xc env` prints `XC_SIM_UDID`).
 - For Swift packages that do not need a simulator, plain `swift test` in the worktree is already isolated by its own `.build`; no wrapper needed.

@@ -11,7 +11,7 @@ Both take 3 worktrees by default (`selftest.sh [--naive] [N]`), build a throwawa
 
 ## Commands
 
-`xc test | build | run | sim | env | status | reset-sim | gc`. Flags (remembered per worktree): `--project`, `--scheme`, `--platform ios|tvos|watchos|visionos|macos`, `--device`, `--runtime`, `--configuration`. `test` also takes `--only Target/Class/test`, `--plan`, `--parallel`. Extra xcodebuild flags go after `--`. Env: `XC_BUILD_SLOTS`, `XC_DEVICE`, `XC_RUNTIME`.
+`xc test | build | run | sim | env | status | reset-sim | gc`. Flags (remembered, and shared by all worktrees of the same repo via `~/Library/Caches/xc-parallel/repo-<hash>.json`): `--project`, `--scheme`, `--platform ios|tvos|watchos|visionos|macos`, `--device`, `--runtime`, `--configuration`. `test` also takes `--only Target/Class/test`, `--plan`, `--parallel`. Extra xcodebuild flags go after `--`. Env: `XC_BUILD_SLOTS`, `XC_DEVICE`, `XC_RUNTIME`.
 
 ## Enforce it: the guard hook (recommended)
 
@@ -22,6 +22,10 @@ python3 scripts/xc guard-snippet     # prints the settings.json hook with the ri
 ```
 
 When the repo has 2+ git worktrees it denies raw `xcodebuild build|test|archive|...`, `simctl boot|shutdown|erase|delete|clone|create` on anything but the worktree's own simulator, and any `simctl` use of `booted`, and tells the agent to use `xc` instead. Read-only commands (`xcodebuild -list`, `-showBuildSettings`, `simctl list|io|spawn|openurl`) and `simctl install|launch <own UDID>` pass. `XC_GUARD=warn` only warns, `off` disables, `always` also blocks in a single worktree. It fails open on any parse error. Other agents (Cursor, Codex, ...) ignore the hook; for them put one line in the repo's `AGENTS.md`/`CLAUDE.md`: "Build, test and run with the xcode-parallel skill (`xc`); never call xcodebuild or simctl directly."
+
+## Validated on a real project
+
+An iOS app repo (Xcode workspace with 30+ schemes, about 10 Swift packages, 36 Swift Testing tests): 3 detached worktrees ran `xc test --only <package tests>` concurrently, all passed, each with its own 2.5 GB DerivedData and simulator, and the Swift Testing results were summarised correctly. Raw `xcodebuild` on a shared simulator also passed there because those tests keep no simulator state, so the isolation matters for tests that touch UserDefaults, keychain, files or the app container, and for build-database errors, not for every suite. Cold builds are CPU-bound; warm incremental `xc test` took about 45 s. What the real project taught us: repeated scheme choice across worktrees (now shared per repo) and project docs that tell agents to use a booted simulator (now called out in SKILL.md).
 
 ## Design notes
 
