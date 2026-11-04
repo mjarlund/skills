@@ -12,7 +12,9 @@ Several agents share one Mac, one CoreSimulator service and (if the MCP is used)
 
 ## Default workflow
 
-Invoke the script by its path inside this skill's directory (the base directory shown when the skill loaded) with `python3`, from anywhere inside the worktree. Below, `xc` stands for `python3 <skill-dir>/scripts/xc`. Set it once per shell command, for example `XC="python3 /path/to/xcode-parallel/scripts/xc"`.
+Invoke the script by its literal path inside this skill's directory (the base directory shown when the skill loaded) with `python3`, from anywhere inside the worktree. Below, `xc` is shorthand for `python3 <skill-dir>/scripts/xc`: write the full path out in every command, for example `python3 ~/.claude/skills/xcode-parallel/scripts/xc test`.
+
+Do not put it in a shell variable (`XC=...; $XC test`) and do not build the command name with substitution. Worktree-isolated agents run under a harness that refuses any command whose name is computed at runtime, because it cannot prove the command is not a git operation on another worktree. Keep each call one plain command; redirect with `> /tmp/x.log 2>&1` and read the log in a second call rather than chaining.
 
 ```bash
 xc test                                  # build-for-testing + test, failures summarised
