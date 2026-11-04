@@ -248,7 +248,10 @@ def pick_spec(plat, args):
     if want:
         runtimes = [r for r in runtimes if r["version"].startswith(want)]
     if not runtimes:
-        die(f"no available {pname} simulator runtime{' matching ' + want if want else ''}")
+        have = sorted({r["version"] for r in simctl_json("runtimes")["runtimes"] if r.get("isAvailable") and r.get("platform") == pname})
+        die(f"no available {pname} simulator runtime{' matching ' + want if want else ''}"
+            + (f" (installed: {', '.join(have)})" if have else "")
+            + f". Install one with `xcodebuild -downloadPlatform {pname}` or Xcode > Settings > Components; list with `xcrun simctl list runtimes`.")
     rt = max(runtimes, key=lambda r: vkey(r["version"]))
     types = rt.get("supportedDeviceTypes", [])
     name = args.device or os.environ.get("XC_DEVICE")
@@ -345,6 +348,7 @@ def destination(st, plat, args, boot=True):
 # ---------------------------------------------------------------- xcodebuild runner
 KEEP = re.compile(r"(error:|\*\* (BUILD|TEST)|Test Case .* failed|✘|Testing failed|fatal error|Failing tests:|Executed \d+ tests|Test run with|Build succeeded|Build failed)")
 current = {"proc": None}
+LAST = {}
 
 
 def _forward(sig, _):
@@ -395,6 +399,7 @@ def run_xcodebuild(st, cmd, cwd, tag):
         rc = p.wait()
     current["proc"] = None
     log(f"{tag}: exit {rc} in {int(time.time() - t0)}s - full log: {logf}")
+    LAST["log"] = logf
     return rc
 
 
@@ -441,6 +446,12 @@ def prelude(args):
     return st, plat, proj, pargs, cwd, scheme
 
 
+def emit(args, **fields):
+    """With --json, print one final `XC_RESULT {...}` line so a coordinator agent can parse the outcome."""
+    if getattr(args, "json", False):
+        print("XC_RESULT " + json.dumps(fields), flush=True)
+
+
 def cmd_build(args, extra):
     st, plat, proj, pargs, cwd, scheme = prelude(args)
     with Lock(os.path.join(st.dir, "worktree.lock"), f"build {st.key}").acquire("another xc command in this worktree"):
@@ -451,6 +462,7 @@ def cmd_build(args, extra):
             rc = run_xcodebuild(st, ["xcodebuild", "build"] + common_args(st, proj, pargs, scheme, dest, args) + extra, cwd, "build")
         finally:
             slot.release()
+    emit(args, command="build", ok=rc == 0, exit_code=rc, log=LAST.get("log"))
     return rc
 
 
@@ -470,12 +482,20 @@ def cmd_test(args, extra):
         finally:
             slot.release()  # test execution is not CPU-gated; only compiling is
         if rc:
+            emit(args, command="test", ok=False, exit_code=rc, phase="build-for-testing", log=LAST.get("log"))
             return rc
         rb = os.path.join(st.results, f"test-{time.strftime('%Y%m%d-%H%M%S')}.xcresult")
         rc = run_xcodebuild(st, ["xcodebuild", "test-without-building"] + base + only + ["-resultBundlePath", rb] + extra, cwd, "test")
+        summ = None
         if os.path.exists(rb):
             log(f"result bundle: {rb}")
-            summarize_results(rb)
+            summ = summarize_results(rb)
+    emit(args, command="test", ok=rc == 0, exit_code=rc, phase="test", log=LAST.get("log"),
+         result_bundle=rb if os.path.exists(rb) else None,
+         passed=(summ or {}).get("passedTests"), failed=(summ or {}).get("failedTests"),
+         skipped=(summ or {}).get("skippedTests"), total=(summ or {}).get("totalTestCount"),
+         failures=[{"test": f"{f.get('targetName', '')}/{f.get('testName', '')}", "message": f.get("failureText", "")}
+                   for f in (summ or {}).get("testFailures", [])[:40]])
     return rc
 
 
@@ -533,7 +553,33 @@ def cmd_env(args, extra):
     return 0
 
 
+def cmd_status_all():
+    """Every worktree xc knows about: who is busy, what simulator, how stale."""
+    rows = []
+    sims = {d["udid"]: d["state"] for devs in simctl_json("devices")["devices"].values() for d in devs}
+    for d in sorted(os.listdir(CACHE)):
+        meta = jload(os.path.join(CACHE, d, "meta.json"), None)
+        if not meta:
+            continue
+        lk = Lock(os.path.join(CACHE, d, "worktree.lock"), "probe")
+        busy = not lk.try_acquire()
+        holder = lk.holder() if busy else ""
+        lk.release()
+        age = int(time.time() - meta.get("last_used", 0))
+        ago = f"{age // 3600}h" if age >= 3600 else f"{age // 60}m"
+        simstates = ",".join(sims.get(e["udid"], "missing") for e in meta.get("sims", {}).values()) or "-"
+        alive = "" if os.path.isdir(meta.get("path", "")) else " (worktree gone)"
+        rows.append((meta.get("path", "?") + alive, "BUSY" if busy else "idle", simstates, ago, holder))
+    if not rows:
+        print("no worktrees known yet")
+    for r in rows:
+        print(f"{r[1]:5} sim={r[2]:9} last-used {r[3]:>4} ago  {r[0]}" + (f"  [{r[4]}]" if r[4] else ""))
+    return 0
+
+
 def cmd_status(args, extra):
+    if args.all:
+        return cmd_status_all()
     st = State()
     print(f"worktree : {st.root}\nstate    : {st.dir}\nconfig   : {json.dumps(st.cfg)}")
     for plat, e in st.meta.get("sims", {}).items():
@@ -680,6 +726,10 @@ def main():
             p.add_argument("--only", action="append", help="Target[/Class[/test]] (repeatable)")
             p.add_argument("--plan", help="test plan name")
             p.add_argument("--parallel", action="store_true", help="enable Xcode parallel testing (clones simulators; heavier)")
+        if n in ("build", "test"):
+            p.add_argument("--json", action="store_true", help="print a final XC_RESULT {...} line for programmatic use")
+        if n == "status":
+            p.add_argument("--all", action="store_true", help="list every known worktree with busy/idle and simulator state")
         if n == "gc":
             p.add_argument("--idle", type=int, default=45, help="minutes before an idle simulator is shut down")
     args = ap.parse_args(argv)

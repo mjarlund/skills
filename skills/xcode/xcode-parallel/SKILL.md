@@ -26,6 +26,8 @@ Project docs (AGENTS.md, testing guides) often say to run `xcodebuild test -dest
 
 Do not call `xcodebuild ... -destination` or `simctl boot booted` yourself, and do not pick a simulator from `simctl list`. Those are the shared resources other agents are using; `xc` hands you a private one. For raw xcodebuild flags, pass them after `--`: `xc build -- -configuration Release`.
 
+Add `--json` to `build`/`test` for a final parseable `XC_RESULT {...}` line (use it when you coordinate other agents); `xc status --all` shows which worktrees are busy.
+
 Builds take minutes and many agent shells time out around 10 minutes, so run `xc test` in the background when the project is large and read the log path it prints instead of re-running. Output is already reduced to errors, test failures and a result summary; the full log path is printed at the end.
 
 First use in a worktree creates its simulator by cloning a warmed template (about 5 s). The first use on the whole machine warms that template once (about 65 s; other agents wait for it and are told so). A brand-new simulator would otherwise take about 65 s to boot every time.

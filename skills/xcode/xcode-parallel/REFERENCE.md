@@ -11,7 +11,7 @@ Both take 3 worktrees by default (`selftest.sh [--naive] [N]`), build a throwawa
 
 ## Commands
 
-`xc test | build | run | sim | env | status | reset-sim | gc`. Flags (remembered, and shared by all worktrees of the same repo via `~/Library/Caches/xc-parallel/repo-<hash>.json`): `--project`, `--scheme`, `--platform ios|tvos|watchos|visionos|macos`, `--device`, `--runtime`, `--configuration`. `test` also takes `--only Target/Class/test`, `--plan`, `--parallel`. Extra xcodebuild flags go after `--`. Env: `XC_BUILD_SLOTS`, `XC_DEVICE`, `XC_RUNTIME`.
+`xc test | build | run | sim | env | status | reset-sim | gc | guard-snippet`. `build` and `test` take `--json` and then end with one parseable `XC_RESULT {ok, exit_code, log, result_bundle, passed, failed, failures[]}` line, handy for coordinator agents. `status --all` lists every known worktree as busy/idle with its simulator state. Flags (remembered, and shared by all worktrees of the same repo via `~/Library/Caches/xc-parallel/repo-<hash>.json`): `--project`, `--scheme`, `--platform ios|tvos|watchos|visionos|macos`, `--device`, `--runtime`, `--configuration`. `test` also takes `--only Target/Class/test`, `--plan`, `--parallel`. Extra xcodebuild flags go after `--`. Env: `XC_BUILD_SLOTS`, `XC_DEVICE`, `XC_RUNTIME`.
 
 ## Enforce it: the guard hook (recommended)
 
@@ -26,6 +26,11 @@ When the repo has 2+ git worktrees it denies raw `xcodebuild build|test|archive|
 ## Validated on a real project
 
 An iOS app repo (Xcode workspace with 30+ schemes, about 10 Swift packages, 36 Swift Testing tests): 3 detached worktrees ran `xc test --only <package tests>` concurrently, all passed, each with its own 2.5 GB DerivedData and simulator, and the Swift Testing results were summarised correctly. Raw `xcodebuild` on a shared simulator also passed there because those tests keep no simulator state, so the isolation matters for tests that touch UserDefaults, keychain, files or the app container, and for build-database errors, not for every suite. Cold builds are CPU-bound; warm incremental `xc test` took about 45 s. What the real project taught us: repeated scheme choice across worktrees (now shared per repo) and project docs that tell agents to use a booted simulator (now called out in SKILL.md).
+
+## Considered and rejected (measured on the real project)
+
+- **Shared compile cache across worktrees** (`COMPILATION_CACHE_ENABLE_CACHING` with a shared `COMPILATION_CACHE_DIR`): cold build of a second worktree took 143 s vs 156 s for the first, about 8%, within noise for the extra moving part.
+- **Shared SwiftPM checkout** (`-clonedSourcePackagesDirPath`): saves about 20 s and 650 MB per new worktree, but worktrees on branches with different dependency pins would keep re-checking-out packages under each other mid-build. Not worth a correctness hazard. SwiftPM's global cache already makes per-worktree resolution take about 20 s.
 
 ## Design notes
 
