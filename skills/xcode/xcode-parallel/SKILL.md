@@ -14,7 +14,13 @@ Several agents share one Mac, one CoreSimulator service and (if the MCP is used)
 
 Invoke the script by its literal path inside this skill's directory (the base directory shown when the skill loaded) with `python3`, from anywhere inside the worktree. Below, `xc` is shorthand for `python3 <skill-dir>/scripts/xc`: write the full path out in every command, for example `python3 ~/.claude/skills/xcode-parallel/scripts/xc test`.
 
-Do not put it in a shell variable (`XC=...; $XC test`) and do not build the command name with substitution. Worktree-isolated agents run under a harness that refuses any command whose name is computed at runtime, because it cannot prove the command is not a git operation on another worktree. Keep each call one plain command; redirect with `> /tmp/x.log 2>&1` and read the log in a second call rather than chaining.
+Worktree-isolated agents run under a harness that refuses commands it cannot prove safe. Parallel runs hit these refusals constantly, so follow all of these from the first call:
+
+- Literal path only: no shell variable for the script (`XC=...; $XC test`), no command substitution in the command name.
+- One plain command per call: no `cd dir && ...`, no `;`, no `&&`/`||` chains. Run from the worktree as-is; `xc` finds the repo from any subdirectory.
+- Redirect with `> /tmp/x.log 2>&1` and read the log in a second call rather than chaining.
+- Quote globs for zsh (`--include='*.swift'`), or an unmatched glob aborts the command.
+- Never delete DerivedData or simulators yourself (the harness denies it, and it may be another agent's); `xc gc` does it safely.
 
 ```bash
 xc test                                  # build-for-testing + test, failures summarised
@@ -27,6 +33,8 @@ xc sim                                   # prints this worktree's simulator UDID
 Project docs (AGENTS.md, testing guides) often say to run `xcodebuild test -destination id=<booted simulator>`. Those commands were written for one agent. Keep their scheme and scope but run them through `xc` (`-only-testing:A/B` becomes `--only A/B`, `-scheme X` becomes `--scheme X`), because a booted simulator is shared by every agent on the machine.
 
 Do not call `xcodebuild ... -destination` or `simctl boot booted` yourself, and do not pick a simulator from `simctl list`. Those are the shared resources other agents are using; `xc` hands you a private one. For raw xcodebuild flags, pass them after `--`: `xc build -- -configuration Release`.
+
+Before opening a PR, prove the change compiles with everything else, not just its own scheme. Two PRs that each built alone have broken `main` together, because a package scheme does not build the app target. Run in order, one call each: the package/library tests (`xc test`), then every scheme that consumes the changed code (`xc build --scheme <app or feature scheme>`, Debug configuration). Also run the test targets CI skips (for example tests that live in the app project rather than a package): check `xc test --plan`/scheme test lists, and say in the PR which suites you could not run.
 
 Add `--json` to `build`/`test` for a final parseable `XC_RESULT {...}` line (use it when you coordinate other agents); `xc status --all` shows which worktrees are busy.
 
@@ -71,13 +79,14 @@ Findings from investigating `xcrun mcpbridge`:
 - Active scheme, test plan and run destination (`XcodeSwitchScheme`, `XcodeSwitchRunDestination`) are per workspace in the GUI, not per agent. Two agents on one workspace overwrite each other's choice.
 - Opening many worktrees in one Xcode costs memory and indexing time.
 
-So build, test and run with `xc`. Reach for the MCP only for things the CLI cannot do: `RenderPreview`, `DocumentationSearch`, `XcodeRefreshCodeIssuesInFile`, `GetBuildLog` diagnostics. Pass an explicit `workspaceIdentifier` and never rely on the active scheme or destination. If the user insists on MCP builds, one agent per workspace is the safe limit.
+So build, test and run with `xc`. Unattended agents cannot use `RenderPreview` (it needs GUI approval in Xcode) and stall on it; for UI changes fall back to `xc build` (previews are compiled with the target) or a snapshot test. Reach for the MCP only for things the CLI cannot do: `RenderPreview` when a human is watching, `DocumentationSearch`, `XcodeRefreshCodeIssuesInFile`, `GetBuildLog` diagnostics. Pass an explicit `workspaceIdentifier` and never rely on the active scheme or destination. If the user insists on MCP builds, one agent per workspace is the safe limit.
 
 ## Maintenance and failure modes
 
 - `xc status`: identity, simulator state, compile-slot usage, disk use.
 - `xc gc`: also runs automatically at most every 6 h. Reclaims simulators and state of removed worktrees, shuts down simulators idle 45+ min (a booted simulator costs about 1 GB RAM), drops DerivedData unused for 14 days. `xc` only ever creates and deletes simulators named `xcp-*`; the user's own are untouched.
-- Disk: each worktree holds a DerivedData plus a simulator. `xc` refuses to start below 3 GiB free and warns below 10 GiB. If the disk fills, delete `~/Library/Caches/xc-parallel`; the next run rebuilds and `xc` recovers by itself.
+- Disk: each worktree holds a DerivedData (2-3 GB) plus a simulator. Below 10 GiB free, every `xc` call runs `xc gc` first and drops DerivedData of idle worktrees unused for 1+ day; it refuses to start only if under 3 GiB remain after that. If it still refuses, other agents' builds are holding the space: wait and retry rather than deleting anything. Budget about 3 GB per concurrent worktree. Last resort for the user: delete `~/Library/Caches/xc-parallel`; the next run rebuilds.
+- Cold builds: the first `xc` build in a new worktree takes minutes (4-5 on a large project), later ones about a minute. That is expected; start the worktree's first build early and in the background. Reuse a worktree for the next task rather than creating a new one.
 - Ambiguity: several projects or schemes make `xc` stop and list them. Pick with `--project` / `--scheme`; the choice is remembered for every worktree of the same repo, so it is made once (large workspaces can have 30+ schemes). `--device "iPhone 17"`, `--runtime 18.5`, `--platform tvos|watchos|visionos|macos` work the same way (env: `XC_DEVICE`, `XC_RUNTIME`).
 - `waiting for ...` lines mean another agent holds a lock or all compile slots. Wait; it is cheaper than a conflict. Do not kill other agents' processes.
 - Not isolatable by `xc`: fixed TCP ports used by tests or local servers, shared on-disk fixture paths outside the repo, shared remote test accounts. Make those per-worktree, for example by deriving them from the simulator UDID (`xc env` prints `XC_SIM_UDID`).

@@ -32,6 +32,12 @@ An iOS app repo (Xcode workspace with 30+ schemes, about 10 Swift packages, 36 S
 - **Shared compile cache across worktrees** (`COMPILATION_CACHE_ENABLE_CACHING` with a shared `COMPILATION_CACHE_DIR`): cold build of a second worktree took 143 s vs 156 s for the first, about 8%, within noise for the extra moving part.
 - **Shared SwiftPM checkout** (`-clonedSourcePackagesDirPath`): saves about 20 s and 650 MB per new worktree, but worktrees on branches with different dependency pins would keep re-checking-out packages under each other mid-build. Not worth a correctness hazard. SwiftPM's global cache already makes per-worktree resolution take about 20 s.
 
+- **Copying a warm DerivedData into a new worktree**: not attempted. Module and index paths embed the absolute source path, so a copy from another worktree mostly rebuilds anyway. Reusing worktrees is the cheap fix (see SKILL.md).
+
+## Field feedback (long session, 4-6 concurrent agents)
+
+No simulator clobbering, "database is locked" or CPU-starvation flakes. Pain points, now addressed in SKILL.md/`xc`: disk dipping to 3.6-5 GiB stalled agents (now gc on pressure), compound commands refused in worktrees (now listed up front), `main` broken by two PRs that built alone (pre-PR recipe), previews unusable unattended (noted). Open: cold build per worktree (about 4-5 min).
+
 ## Design notes
 
 - Worktree identity is the real path of `git rev-parse --show-toplevel`; state is `~/Library/Caches/xc-parallel/<name>-<hash>/`. Deleting that folder is always safe.

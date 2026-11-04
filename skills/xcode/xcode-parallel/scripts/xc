@@ -426,11 +426,31 @@ def summarize_results(path):
 
 
 # ---------------------------------------------------------------- commands
+def free_gib():
+    os.makedirs(CACHE, exist_ok=True)
+    return shutil.disk_usage(CACHE).free / 2**30
+
+
+def pressure_gc():
+    gl = Lock(os.path.join(CACHE, "slots", "gc.lock"), "gc")
+    if gl.try_acquire():
+        try:
+            gc(verbose=True, stale_days=1)
+        finally:
+            gl.release()
+    else:  # another agent is already reclaiming; give it a moment
+        time.sleep(5)
+
+
 def prelude(args):
     st = State()
-    free = shutil.disk_usage(CACHE).free / 2**30
+    free = free_gib()
+    if free < 10:  # disk pressure: reclaim now instead of waiting for the 6 h timer or failing
+        log(f"only {free:.1f} GiB free - running gc (also dropping DerivedData of worktrees idle 1+ day)")
+        pressure_gc()
+        free = free_gib()
     if free < 3:
-        die(f"only {free:.1f} GiB free - builds and simulators need space. Run `xc gc`, delete old worktrees, or clear ~/Library/Developer/Xcode/DerivedData")
+        die(f"only {free:.1f} GiB free after gc - builds and simulators need space. Delete old worktrees or clear ~/Library/Developer/Xcode/DerivedData yourself, then retry")
     if free < 10:
         log(f"WARNING: only {free:.1f} GiB free; every worktree keeps its own DerivedData + simulator")
     opportunistic_gc(st)
@@ -608,7 +628,7 @@ def delete_sim(udid):
     run(["xcrun", "simctl", "delete", udid])
 
 
-def gc(verbose=True, idle_min=45):
+def gc(verbose=True, idle_min=45, stale_days=14):
     known = set()
     now = time.time()
     for d in os.listdir(CACHE) if os.path.isdir(CACHE) else []:
@@ -634,9 +654,9 @@ def gc(verbose=True, idle_min=45):
                         run(["xcrun", "simctl", "shutdown", e["udid"]])
                         verbose and log(f"shut down idle simulator {e['name']}")
             dd = os.path.join(sd, "DerivedData")
-            if os.path.isdir(dd) and now - meta.get("last_used", 0) > 14 * 86400:
+            if os.path.isdir(dd) and now - meta.get("last_used", 0) > stale_days * 86400:
                 shutil.rmtree(dd, ignore_errors=True)  # stale worktree: reclaim GBs, rebuilt on demand
-                verbose and log(f"dropped DerivedData of {d} (unused 14d)")
+                verbose and log(f"dropped DerivedData of {d} (unused {stale_days}d)")
             for sub in ("logs", "results"):
                 p = os.path.join(sd, sub)
                 for f in os.listdir(p) if os.path.isdir(p) else []:
