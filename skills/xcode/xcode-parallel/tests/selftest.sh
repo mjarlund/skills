@@ -9,7 +9,7 @@ for a in "$@"; do case $a in --naive) MODE=naive;; [0-9]*) N=$a;; esac; done
 HERE=$(cd "$(dirname "$0")" && pwd)
 XC="$HERE/../scripts/xc"
 T=$(mktemp -d /tmp/xc-selftest.XXXXXX)
-cleanup() { (cd "$T/main" 2>/dev/null && for i in $(seq 1 "$N"); do git worktree remove --force "../wt$i" 2>/dev/null; done); python3 "$XC" gc >/dev/null 2>&1; [ -n "${NAIVE_SIM:-}" ] && { xcrun simctl shutdown "$NAIVE_SIM"; xcrun simctl delete "$NAIVE_SIM"; } >/dev/null 2>&1; rm -rf "$T"; }
+cleanup() { (cd "$T/main" 2>/dev/null && for i in $(seq 1 "$N"); do git worktree remove --force "../wt$i" 2>/dev/null; done); python3 "$XC" gc --yes >/dev/null 2>&1; [ -n "${NAIVE_SIM:-}" ] && { xcrun simctl shutdown "$NAIVE_SIM"; xcrun simctl delete "$NAIVE_SIM"; } >/dev/null 2>&1; rm -rf "$T"; }
 trap cleanup EXIT
 mkdir -p "$T/main" && cp -R "$HERE/fixture/." "$T/main/" && cd "$T/main" || exit 1
 git init -q -b main . && git add -A && git -c user.email=t@t -c user.name=t commit -qm init

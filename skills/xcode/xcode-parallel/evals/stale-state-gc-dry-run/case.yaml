@@ -1,0 +1,6 @@
+schema_version: "1.1"
+name: stale-state-gc-dry-run
+expected_outcome: |
+  Agent previews cleanup with plain `xc gc` (dry-run) before applying it with `xc gc --yes`,
+  rather than jumping straight to --yes or deleting state by hand. Live/busy worktrees' state
+  is left alone.

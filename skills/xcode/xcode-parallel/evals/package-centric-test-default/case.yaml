@@ -1,0 +1,8 @@
+schema_version: "1.1"
+name: package-centric-test-default
+expected_outcome: |
+  Agent does not assume the app project/scheme (the remembered `build` default) also covers
+  `xc test` in this package-centric repo. When `xc test` reports no test bundles for that
+  scheme, the agent switches to the package's own test scheme (e.g. via --scheme/--project for
+  that call, or `xc config set --target test ...`) instead of concluding there are no tests or
+  silently reporting success.
