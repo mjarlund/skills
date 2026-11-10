@@ -91,3 +91,19 @@ openscad -o out/part-top.png --render --imgsize=900,700 --autocenter --viewall \
 
 Only use a library (BOSL2, NopSCADlib) when the project already does, or the user
 agrees; it adds a dependency anyone opening the file must install.
+
+## Testing that parts fit together
+
+`scripts/check_overlap.py` intersects two parts and reports the overlap volume
+(touching faces count as clear). Expose each part as a module taking its pose, then:
+
+```bash
+# clear in the finished pose
+python3 <skill-dir>/scripts/check_overlap.py models/part.scad "cradle()" "key(x = 15)"
+# must collide when pulled the wrong way (the hook should hold)
+python3 <skill-dir>/scripts/check_overlap.py models/part.scad "cradle()" "translate([0, 3, 0]) key(x = 15)"
+```
+
+Exit 0 = clear, 1 = collision, 2 = error (unknown module, missing file). Only modules are
+visible to it, not variables, so pass numbers as arguments. Sweep a few poses along the
+insertion path, e.g. in a shell loop over the offset.

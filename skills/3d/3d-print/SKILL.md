@@ -57,8 +57,8 @@ stopping but still verify each stage.
 
 ## 4. Verify every checkpoint
 
-A file that compiles is not a correct part. Wrong sizes, missing cuts, and features
-floating free all compile cleanly, and the user only finds out after a print.
+A file that compiles is not a correct part. Wrong sizes, missing cuts, features
+floating free, and parts that cannot be assembled all compile cleanly, and the user only finds out after a print.
 
 1. Export the STL with the tool's command.
 2. Check the mesh and size:
@@ -67,7 +67,18 @@ floating free all compile cleanly, and the user only finds out after a print.
    solids, and an outer size off by more than 0.5 mm.
 3. Render a preview image and look at it. Confirm every feature you added is
    there, in the right place, cut the right way.
-4. Fix and repeat before reporting. Report the commands run and their results.
+4. If parts must go together (a key into a slot, a lid onto a box, a clip, a part
+   hung from a board), test the assembly, not only the finished pose. A part can sit
+   correctly in its slot and still be impossible to get there: a hook wider than the
+   hole it must pass through compiles, exports, and looks right, then fails at the
+   bench. Work out the path each part takes (start, mid-way, final, and the
+   removal), and at several poses along it run
+   `python3 scripts/check_overlap.py <model.scad> "<part A>" "<part B at this pose>"`
+   (CadQuery: `a.intersect(b).val().Volume()` — see CADQUERY.md). Every pose on the
+   path must be clear; the parts that are meant to hold each other must collide when
+   you pull them the wrong way. If no path exists, redesign the parts (a taller slot,
+   a separate piece, a different insertion direction) rather than adjusting numbers.
+5. Fix and repeat before reporting. Report the commands run and their results.
 
 If the CAD tool is not installed, say so plainly, give the exact commands, and do
 not describe the part as verified.

@@ -81,3 +81,20 @@ The SVG is a line drawing with hidden edges dashed. To look at it as an image,
 convert it if a converter exists (`rsvg-convert -o out/part.png out/part.svg`, or
 `cairosvg out/part.svg -o out/part.png`); otherwise rely on the size check and describe the geometry
 from the code.
+
+## Testing that parts fit together
+
+Move one part along the path it takes and check the overlap volume at each pose; touching
+faces give about 0.
+
+```python
+def overlap(a, b):
+    common = a.intersect(b).vals()
+    return sum(v.Volume() for v in common) if common else 0.0
+
+for dy in (20, 12, 6, 3, 0):                      # key sliding toward its slot
+    assert overlap(cradle, key.translate((0, dy, 0))) < 0.5, f"collides at dy={dy}"
+```
+
+Also check the finished pose is clear, and that pulling the part the wrong way collides
+if it is meant to hold.
