@@ -1,181 +1,118 @@
 ---
 name: 3d-print
-description: Design 3D-printable parts via parametric CAD scripts, then export STL for slicing and printing. Use when user wants to create a part, enclosure, mount, bracket, adapter, or other printable model.
-references: [REFERENCE.md]
+description: Design 3D-printable parts as parametric CAD scripts (OpenSCAD or CadQuery), verify the geometry, and export STL for slicing. Use whenever the user wants to create or modify a printable part — enclosure, case, mount, bracket, holder, adapter, spacer, knob, clip, lid — or mentions OpenSCAD, .scad files, CadQuery, STL export, or "something I can 3D print", even if they don't say "CAD". For diagnosing a print that already failed, use 3d-diagnose instead.
+compatibility: Builds need OpenSCAD or CadQuery (Python). scripts/check_stl.py needs only python3. Without the tools, the skill still writes the model and gives the user exact commands to run.
 ---
 
-# 3D Print Skill
+# 3D Print
 
-<what-to-do>
+Turn a description of a physical part into a parametric CAD script that exports a
+printable STL, checking at every stage that the geometry is what was intended.
 
-Drive the user to a manufacturable part definition, then produce a parametric CAD script and STL export path.
+## 1. Requirements
 
-Start by understanding what the user wants to make: ask about part intent and function first. Do not ask about tool choice upfront — select the tool from these rules and state your recommendation with reason:
-- OpenSCAD: default for simple/medium geometry, standalone workflow, no Python environment.
-- CadQuery: Python already in project, complex parametric assemblies, programmatic repetition.
-- Ask the user only if the choice is genuinely ambiguous after applying these rules.
+Look first: existing `.scad`/`.py` models, drawings, photos, or datasheets in the
+repo often answer the questions below. Then ask only what blocks the base shape —
+usually what the part does, what it attaches to or holds, and the critical
+dimensions of anything it must fit. Ask one question at a time, with your
+recommended answer and why.
 
-Confirm tool choice at Checkpoint A before writing geometry.
+For everything else, propose defaults in one short list the user can correct
+instead of asking each one:
 
-Interview the user across dimensions, material, tolerances, and assembly constraints before writing final geometry.
+- Material: PLA (unless heat over ~55 °C, outdoor use, flexing, or repeated snapping)
+- Fit: slip, 0.2 mm per side, for mating parts
+- Walls: 2.0 mm
+- Fasteners: M3, heat-set inserts if it will be opened often
+- Print orientation: largest flat face on the bed
+- Printer: 0.4 mm nozzle, 0.2 mm layers, bed size not limiting
 
-Ask one question at a time. For each question, include your recommended answer and why.
+Dimensions of real objects the part must fit are the biggest source of failed
+prints. Ask the user to measure them with calipers when it matters, and list any
+dimension you assumed (from a datasheet or REFERENCE.md) so they can check it.
 
-If a question can be answered by existing files in the repo, check files first and avoid asking the user.
+## 2. Tool
 
-Preserve the same modeling intent across tools: parameters, constraints, clearances, and printability checks should match regardless of syntax.
+Pick without asking, and state the choice and reason in the first checkpoint:
 
-Use this staged loop:
-- Checkpoint A: Confirm tool choice. Base body only. No fasteners, no clips, no decorative details.
-- Checkpoint B: Functional features (holes, slots, channels, clips, cable paths, mating interfaces).
-- Checkpoint C: Finish passes (fillets/chamfers/text/material tweaks) and final STL export guidance.
+- Existing model in the repo → keep its tool and parameter names.
+- OpenSCAD → default: simple to medium geometry, no Python needed, Customizer sliders.
+- CadQuery → Python already in the project, fillets on complex edges, STEP output,
+  or heavy programmatic generation.
 
-At each checkpoint:
-- Write the updated script to a file in the workspace.
-- Show the file path and a concise summary of what changed.
-- Attempt a build/validation run for the selected tool to verify syntax.
-- Report the exact command run and whether it passed or failed.
-- If it fails, fix errors and re-run validation before asking for approval.
-- Explain what changed and why.
-- Run the printability checklist.
-- Wait for approval before moving on.
+Then read `OPENSCAD.md` or `CADQUERY.md` for file layout, pitfalls, and the build,
+check and preview commands.
 
-When delivering a final answer, include:
-- Final script file path.
-- Parameter table with defaults.
-- STL generation command or export step.
-- Suggested slicer baseline settings.
+## 3. Build in checkpoints
 
-</what-to-do>
+- **A. Base body** — overall shape, walls, print orientation. No holes or details.
+- **B. Functional features** — holes, fasteners, slots, clips, cable paths, mating
+  interfaces.
+- **C. Finish** — fillets, chamfers, text, and the final export.
 
-<supporting-info>
+Edit the same script file at each stage. At each checkpoint, verify (below),
+review it against the design rules, then show the file path, what changed and why,
+and wait for approval. If the user wants it done in one go, run all three without
+stopping but still verify each stage.
 
-## Core workflow
+## 4. Verify every checkpoint
 
-Pipeline:
-1. Define intent and constraints.
-2. Build parametric CAD script.
-3. Write/update the CAD script file in the workspace.
-4. Generate STL from the chosen CAD tool.
-5. Slice in the user's slicer of choice.
-6. Print, test fit, iterate.
+A file that compiles is not a correct part. Wrong sizes, missing cuts, and features
+floating free all compile cleanly, and the user only finds out after a print.
 
-Note: prefer editing the same script file through checkpoints instead of creating a new file each time.
+1. Export the STL with the tool's command.
+2. Check the mesh and size:
+   `python3 scripts/check_stl.py <part.stl> --expect WxDxH`
+   It fails on holes in the mesh, zero-thickness faces, flipped faces, extra
+   solids, and an outer size off by more than 0.5 mm.
+3. Render a preview image and look at it. Confirm every feature you added is
+   there, in the right place, cut the right way.
+4. Fix and repeat before reporting. Report the commands run and their results.
 
-Treat OpenSCAD as a first-class target, but keep instructions transferable across CAD tools.
+If the CAD tool is not installed, say so plainly, give the exact commands, and do
+not describe the part as verified.
 
-## Requirements interview checklist
+## Design rules
 
-Clarify these before full geometry:
-- Function: What does the part hold, protect, align, or attach to?
-- Envelope: Maximum width, depth, height limits.
-- Interfaces: Screws, inserts, rails, snap features, press fits, cable exits.
-- Material: PLA, PETG, TPU, ABS, or other.
-- Strength direction: Which axis sees load?
-- Print constraints: Orientation preference, support tolerance, nozzle/layer assumptions.
-- Fit class: Tight, nominal, or loose for each mating feature.
-- Quantity/intent: One-off prototype or will you print multiples/iterate? (Affects fastener choice, tolerances, material.)
+These prevent the common printability failures. Values and tables are in
+`REFERENCE.md` — read it whenever you size a hole, fastener, fit, insert, snap fit,
+or a device cutout.
 
-## Printability checklist
+- **Orientation first.** It decides which overhangs exist and how strong the part
+  is: layers pull apart at about half the strength of the plastic along them.
+- **Flat base on the bed**, with a 0.4–0.5 mm bottom chamfer so elephant's foot
+  doesn't stop the part seating.
+- **Overhangs ≤ 45°, bridges ≤ 20 mm.** Use chamfers rather than fillets on
+  downward-facing edges, and teardrops for horizontal holes over ~5 mm.
+- **Walls 2.0 mm default, 1.2 mm minimum.** Smallest feature about 0.8 mm.
+- **Clearance once, per side, on the female feature.** Vertical holes also get
+  `HOLE_COMP` because they print undersize.
+- **One solid.** Overlap every joined feature into the body; never let parts touch
+  only at a face or edge.
+- **Z heights in multiples of the layer height** when they matter (lids, steps).
 
-Run before each checkpoint:
-- Bottom face flat for bed adhesion.
-- Overhangs at or below 45 degrees when possible.
-- Wall thickness at least 1.2 mm, default 2.0 mm.
-- Bridge spans at or below 20 mm unless supports are accepted.
-- Hole clearances adjusted by material:
-    - PLA: +0.3 mm
-    - PETG: +0.4 mm
-    - TPU: +0.5 mm
-- No zero-thickness geometry or self-intersections.
+## Fit test piece
 
-## Default design values
+When the part has press fits, inserts, or several mating parts, suggest printing
+`assets/fit-coupon.scad` once per printer and material (instructions in its
+header). It measures that printer's real clearances, hole compensation, and insert
+bore, which replace the defaults. Generic values are off by 0.1–0.2 mm between
+printers, which is the difference between a press fit and one that won't go in.
 
-- Wall thickness: 2.0 mm
-- Exterior fillet: 1.5 mm
-- Bottom chamfer: 0.5 mm
-- Layer height assumption: 0.2 mm (round critical Z heights accordingly)
+## Revisions
 
-## Parametric behavior
+Map natural-language changes to parameters, not to new geometry: "5 mm taller" →
+`H += 5`; "looser" → raise `FIT`; "holes further out" → hole spacing. If a change
+needs a new parameter, add it at the top with the others.
 
-Expect natural-language revisions and map them to parameter edits:
-- Make it 5 mm taller -> increase H by 5.
-- Make walls thicker -> increase WALL.
-- Looser fit -> increase clearance offset.
-- Move mounting holes outwards -> update hole spacing parameters.
+## Deliverable
 
-## Example patterns
+- Script path and STL path(s), one STL per separately printed part
+- Parameter table: name, default, meaning
+- The export command and the check result
+- Print settings: orientation, material, walls, infill, supports (baseline in
+  REFERENCE.md)
+- Assumed dimensions the user should check, and what to test on the first print
 
-OpenSCAD style starter:
-```scad
-W = 40;
-D = 30;
-H = 10;
-WALL = 2;
-
-difference() {
-    cube([W, D, H], center = true);
-    cube([W - 2*WALL, D - 2*WALL, H], center = true);
-}
-```
-
-CadQuery style starter:
-```python
-import cadquery as cq
-
-W, D, H = 40, 30, 10
-WALL = 2.0
-
-result = (
-        cq.Workplane("XY")
-        .box(W, D, H)
-        .shell(-WALL)
-)
-```
-
-## STL export expectations
-
-Always include an explicit export step for the chosen tool.
-
-Script file conventions:
-- OpenSCAD: use `.scad` files (for example `models/part-name.scad`).
-- CadQuery: use `.py` files (for example `models/part-name.py`).
-- If the user does not provide a path, choose a sensible default path and state it explicitly.
-
-CadQuery example:
-```python
-cq.exporters.export(
-        result,
-        "output.stl",
-        exportType="STL",
-        tolerance=0.01,
-        angularTolerance=0.1,
-)
-```
-
-OpenSCAD example:
-```bash
-openscad -o output.stl model.scad
-```
-
-## Checkpoint syntax/build validation
-
-Validate at every checkpoint after writing the script file.
-
-OpenSCAD validation command:
-```bash
-openscad -o /tmp/3d-print-check.stl <path-to-model.scad>
-```
-
-CadQuery validation command:
-```bash
-python <path-to-model.py>
-```
-
-If required tooling is not available, state that clearly and provide the exact command the user can run locally.
-
-## Fastener and tolerance references
-
-For standard dimensions, material offsets, and slicer defaults, see REFERENCE.md.
-
-</supporting-info>
+If a printed part has defects (stringing, warping, layer splits), that is the
+`3d-diagnose` skill's job; come back here when the cause turns out to be geometry.
